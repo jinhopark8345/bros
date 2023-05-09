@@ -991,7 +991,7 @@ class BrosModel(BrosPreTrainedModel):
         BROS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
     )
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=BaseModelOutputWithPoolingAndCrossAttentions,
         config_class=_CONFIG_FOR_DOC,
@@ -1479,7 +1479,7 @@ class BrosForMaskedLM(BrosPreTrainedModel):
         BROS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
     )
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=MaskedLMOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1600,7 +1600,7 @@ class BrosForSequenceClassification(BrosPreTrainedModel):
         BROS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
     )
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=SequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1697,11 +1697,7 @@ class BrosForTokenClassification(BrosPreTrainedModel):
         self.num_labels = config.num_labels
 
         self.bros = BrosModel(config, add_pooling_layer=False)
-        classifier_dropout = (
-            config.classifier_dropout
-            if config.classifier_dropout is not None
-            else config.hidden_dropout_prob
-        )
+        classifier_dropout = config.classifier_dropout if hasattr(config, 'classifier_dropout') else config.hidden_dropout_prob
         self.dropout = nn.Dropout(classifier_dropout)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
@@ -1711,7 +1707,7 @@ class BrosForTokenClassification(BrosPreTrainedModel):
         BROS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
     )
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TokenClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1719,6 +1715,7 @@ class BrosForTokenClassification(BrosPreTrainedModel):
     def forward(
         self,
         input_ids=None,
+        bbox=None,
         attention_mask=None,
         token_type_ids=None,
         position_ids=None,
@@ -1740,6 +1737,7 @@ class BrosForTokenClassification(BrosPreTrainedModel):
 
         outputs = self.bros(
             input_ids,
+            bbox=bbox,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
