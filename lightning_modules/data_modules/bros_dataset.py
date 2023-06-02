@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data.dataset import Dataset
 
+from datasets import load_dataset
+
 from utils import get_class_names
 
 
@@ -42,7 +44,7 @@ class BROSDataset(Dataset):
         self.sep_token_id = self.tokenizer.vocab["[SEP]"]
         self.unk_token_id = self.tokenizer.vocab["[UNK]"]
 
-        self.examples = self._load_examples()
+        self.examples = load_dataset(self.dataset)[mode]
 
         if not (self.dataset == "funsd" and self.model_head == "bies"):
             self.class_names = get_class_names(self.dataset_root_path)

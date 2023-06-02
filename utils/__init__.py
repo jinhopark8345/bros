@@ -43,14 +43,14 @@ def _get_config_from_cli():
 
 
 def _check_config(cfg):
-    assert cfg.dataset in ["funsd", "sroie"]
+    assert cfg.dataset in ["funsd", "sroie", "jinho8345/bros-sroie"]
     if cfg.dataset == "funsd":
         assert cfg.task in ["ee", "el"]
         if cfg.task == "ee":
             assert cfg.model.head in ["bies", "spade"]
         elif cfg.task == "el":
             assert cfg.model.head == "spade_rel"
-    elif cfg.dataset == "sroie":
+    elif cfg.dataset in ["sroie", "jinho8345/bros-sroie"]:
         assert cfg.task == "ee"
         if cfg.task == "ee":
             assert cfg.model.head == "bio"
@@ -71,7 +71,7 @@ def _update_config(cfg):
         elif cfg.task == "el":
             cfg.dataset_root_path = "./datasets/funsd_spade"
             cfg.model.n_classes = 3
-    elif cfg.dataset == "sroie":
+    elif cfg.dataset in ["sroie", "jinho8345/bros-sroie"]:
         if cfg.task == "ee":
             if cfg.model.head == "bio":
                 cfg.dataset_root_path = "./datasets/sroie"

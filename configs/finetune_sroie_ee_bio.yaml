@@ -4,7 +4,7 @@
 workspace: ./finetune_sroie_ee_bio__bros-base-uncased
 #workspace: ./finetune_sroie_ee_bio__layoutlm-base-uncased
 
-dataset: sroie
+dataset: jinho8345/bros-sroie
 task: ee
 
 model:
