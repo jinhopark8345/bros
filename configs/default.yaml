@@ -26,7 +26,7 @@ train:
   num_samples_per_epoch: 150
   max_epochs: 100
   use_fp16: True
-  accelerator: gpu
+  accelerator: cpu
   strategy:
     type: ddp
 

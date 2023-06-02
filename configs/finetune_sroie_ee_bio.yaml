@@ -18,7 +18,7 @@ train:
   max_seq_length: 512
   max_epochs: 30  # 16 * 1000 / 526 = 30.42
   use_fp16: True
-  accelerator: gpu
+  accelerator: cpu
   strategy:
     type: ddp
 
