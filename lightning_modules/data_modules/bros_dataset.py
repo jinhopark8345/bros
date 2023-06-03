@@ -116,11 +116,6 @@ class BROSDataset(Dataset):
 
         bbox[: len(bbox_list)] = bbox_list
 
-        if self.backbone_type == "layoutlm":
-            bbox = bbox[:, [0, 1, 4, 5]]
-            bbox = bbox * 1000
-            bbox = bbox.astype(int)
-
         input_ids = torch.from_numpy(input_ids)
         bbox = torch.from_numpy(bbox)
         attention_mask = torch.from_numpy(attention_mask)
@@ -200,11 +195,6 @@ class BROSDataset(Dataset):
         # Normalize bbox -> 0 ~ 1
         bbox[:, [0, 2, 4, 6]] = bbox[:, [0, 2, 4, 6]] / width
         bbox[:, [1, 3, 5, 7]] = bbox[:, [1, 3, 5, 7]] / height
-
-        if self.backbone_type == "layoutlm":
-            bbox = bbox[:, [0, 1, 4, 5]]
-            bbox = bbox * 1000
-            bbox = bbox.astype(int)
 
         # Label
         classes_dic = json_obj["parse"]["class"]
@@ -340,11 +330,6 @@ class BROSDataset(Dataset):
         bbox[:, [0, 2, 4, 6]] = bbox[:, [0, 2, 4, 6]] / width
         bbox[:, [1, 3, 5, 7]] = bbox[:, [1, 3, 5, 7]] / height
 
-        if self.backbone_type == "layoutlm":
-            bbox = bbox[:, [0, 1, 4, 5]]
-            bbox = bbox * 1000
-            bbox = bbox.astype(int)
-
         st_indices = [
             indices[0]
             for indices in box_to_token_indices
@@ -474,11 +459,6 @@ class BROSDataset(Dataset):
         # bounding box normalization -> [0, 1]
         bbox[:, [0, 2, 4, 6]] = bbox[:, [0, 2, 4, 6]] / width
         bbox[:, [1, 3, 5, 7]] = bbox[:, [1, 3, 5, 7]] / height
-
-        if self.backbone_type == "layoutlm":
-            bbox = bbox[:, [0, 1, 4, 5]]
-            bbox = bbox * 1000
-            bbox = bbox.astype(int)
 
         st_indices = [
             indices[0]

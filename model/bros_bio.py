@@ -22,15 +22,6 @@ class BROSBIOModel(nn.Module):
             self.backbone_config = BrosConfig.from_pretrained(self.model_cfg.backbone)
             self.tokenizer = BrosTokenizer.from_pretrained(self.model_cfg.backbone)
             self.backbone = BrosModel.from_pretrained(self.model_cfg.backbone)
-        elif self.model_cfg.backbone in [
-            "microsoft/layoutlm-base-uncased",
-            "microsoft/layoutlm-large-uncased",
-        ]:
-            self.backbone_config = LayoutLMConfig.from_pretrained(
-                self.model_cfg.backbone
-            )
-            self.tokenizer = LayoutLMTokenizer.from_pretrained(self.model_cfg.backbone)
-            self.backbone = LayoutLMModel.from_pretrained(self.model_cfg.backbone)
         else:
             raise ValueError(
                 f"Not supported model: self.model_cfg.backbone={self.model_cfg.backbone}"

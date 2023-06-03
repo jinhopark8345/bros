@@ -13,9 +13,9 @@ model:
   head: bio
 
 train:
-  batch_size: 16
+  batch_size: 1
   num_samples_per_epoch: 526
-  max_seq_length: 512
+  max_seq_length: 32
   max_epochs: 30  # 16 * 1000 / 526 = 30.42
   use_fp16: True
   accelerator: cpu
@@ -38,6 +38,6 @@ train:
   val_interval: 1  # in epochs
 
 val:
-  batch_size: 8
+  batch_size: 1
   num_workers: 0
   limit_val_batches: 1.0

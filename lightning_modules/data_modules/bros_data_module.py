@@ -28,11 +28,6 @@ class BROSDataModule(pl.LightningDataModule):
             "naver-clova-ocr/bros-large-uncased",
         ]:
             self.backbone_type = "bros"
-        elif self.cfg.model.backbone in [
-            "microsoft/layoutlm-base-uncased",
-            "microsoft/layoutlm-large-uncased",
-        ]:
-            self.backbone_type = "layoutlm"
         else:
             raise ValueError(
                 f"Not supported model: self.cfg.model.backbone={self.cfg.model.backbone}"

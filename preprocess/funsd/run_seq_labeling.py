@@ -214,8 +214,6 @@ def train(  # noqa C901
                 "attention_mask": batch[1].to(args.device),
                 "labels": batch[3].to(args.device),
             }
-            if args.model_type in ["layoutlm"]:
-                inputs["bbox"] = batch[4].to(args.device)
             inputs["token_type_ids"] = (
                 batch[2].to(args.device) if args.model_type in ["bert", "layoutlm"] else None
             )  # RoBERTa don"t use segment_ids
@@ -339,8 +337,6 @@ def evaluate(args, model, tokenizer, labels, pad_token_label_id, mode, prefix=""
                 "attention_mask": batch[1].to(args.device),
                 "labels": batch[3].to(args.device),
             }
-            if args.model_type in ["layoutlm"]:
-                inputs["bbox"] = batch[4].to(args.device)
             inputs["token_type_ids"] = (
                 batch[2].to(args.device)
                 if args.model_type in ["bert", "layoutlm"]
