@@ -9,12 +9,16 @@ import os
 import torch
 from pytorch_lightning import Trainer
 from pytorch_lightning.utilities.seed import seed_everything
+from bros.modeling_bros import BrosForSequenceClassification, BrosForTokenClassification
+from bros import BrosConfig
 
 from lightning_modules.bros_bies_module import BROSBIESModule
 from lightning_modules.bros_bio_module import BROSBIOModule
 from lightning_modules.bros_spade_module import BROSSPADEModule
 from lightning_modules.bros_spade_rel_module import BROSSPADERELModule
 from lightning_modules.data_modules.bros_data_module import BROSDataModule
+
+from bros import BrosTokenizer
 from utils import get_callbacks, get_config, get_loggers, get_plugins
 
 
@@ -50,18 +54,17 @@ def main():
         limit_val_batches=cfg.val.limit_val_batches,
     )
 
-    if cfg.model.head == "bies":
-        pl_module = BROSBIESModule(cfg)
-    elif cfg.model.head == "bio":
-        pl_module = BROSBIOModule(cfg)
-    elif cfg.model.head == "spade":
-        pl_module = BROSSPADEModule(cfg)
-    elif cfg.model.head == "spade_rel":
-        pl_module = BROSSPADERELModule(cfg)
-    else:
-        raise ValueError(f"Not supported head {cfg.model.head}")
+    bros_tokenizer = BrosTokenizer.from_pretrained("/Users/jinho/Projects/bros/saved_models")
+    data_module = BROSDataModule(cfg, bros_tokenizer)
 
-    data_module = BROSDataModule(cfg, pl_module.net.tokenizer)
+    bros_config = BrosConfig.from_pretrained("/Users/jinho/Projects/bros/saved_models")
+    bros_model = BrosForTokenClassification.from_pretrained("/Users/jinho/Projects/bros/saved_models")
+
+
+    pl_module = BROSBIOModule(cfg, bros_model)
+
+
+
 
     trainer.fit(pl_module, datamodule=data_module)
 

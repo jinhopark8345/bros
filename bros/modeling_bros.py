@@ -1696,7 +1696,7 @@ class BrosForTokenClassification(BrosPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
 
-        self.bros = BrosModel(config, add_pooling_layer=False)
+        self.bros = BrosModel(config)
         classifier_dropout = config.classifier_dropout if hasattr(config, 'classifier_dropout') else config.hidden_dropout_prob
         self.dropout = nn.Dropout(classifier_dropout)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)

@@ -7,6 +7,7 @@ from overrides import overrides
 from omegaconf import OmegaConf
 
 import torch
+import torch.nn as nn
 from torch.optim import SGD, Adam, AdamW
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
@@ -25,6 +26,7 @@ import re
 from pathlib import Path
 
 from pytorch_lightning.utilities import rank_zero_only
+from pytorch_lightning.utilities.seed import seed_everything
 from torch.optim.lr_scheduler import LambdaLR
 
 from utils import get_callbacks, get_config, get_loggers, get_plugins
@@ -264,12 +266,40 @@ class BROSModelPLModule(pl.LightningModule):
             "adam": Adam,
             "adamw": AdamW,
         }
+        self.loss_func = nn.CrossEntropyLoss()
 
+
+    def model_forward(self, batch):
+        input_ids = batch["input_ids"]
+        bbox = batch["bbox"]
+        attention_mask = batch["attention_mask"]
+
+        head_outputs = self.model(
+            input_ids=input_ids, bbox=bbox, attention_mask=attention_mask
+        )
+
+        loss = self._get_loss(head_outputs.logits, batch)
+
+        return head_outputs, loss
+
+    def _get_loss(self, head_outputs, batch):
+        # batch["are_box_first_tokens"] : [1, 512]
+        mask = batch["are_box_first_tokens"].view(-1) # [512]
+
+        # head_outputs : torch.Size([1, 512, 9])
+        logits = head_outputs.view(-1, self.cfg.model.n_classes) # [512, 9]
+        logits = logits[mask] # torch.Size([105, 9])
+
+        labels = batch["bio_labels"].view(-1) # torch.Size([512])
+        labels = labels[mask] # torch.Size([105])
+
+        loss = self.loss_func(logits, labels)
+
+        return loss
 
     @overrides
     def training_step(self, batch, batch_idx, *args):
-        _, loss = self.net(batch)
-
+        _, loss = self.model_forward(batch)
         log_dict_input = {"train_loss": loss}
         self.log_dict(log_dict_input, sync_dist=True)
         return loss
@@ -277,7 +307,7 @@ class BROSModelPLModule(pl.LightningModule):
     @torch.no_grad()
     @overrides
     def validation_step(self, batch, batch_idx, *args):
-        head_outputs, loss = self.net(batch)
+        head_outputs, loss = self.model_forward(batch)
         step_out = do_eval_step(batch, head_outputs, loss, self.eval_kwargs)
         return step_out
 
@@ -289,23 +319,13 @@ class BROSModelPLModule(pl.LightningModule):
             f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
         )
 
+    @torch.no_grad()
+    @overrides
     def validation_epoch_end(self, validation_step_outputs):
-        # num_of_loaders = len(self.cfg.dataset_name_or_paths)
-        # if num_of_loaders == 1:
-        #     validation_step_outputs = [validation_step_outputs]
-        # assert len(validation_step_outputs) == num_of_loaders
-        # cnt = [0] * num_of_loaders
-        # total_metric = [0] * num_of_loaders
-        # val_metric = [0] * num_of_loaders
-        # for i, results in enumerate(validation_step_outputs):
-        #     for scores in results:
-        #         cnt[i] += len(scores)
-        #         total_metric[i] += np.sum(scores)
-        #     val_metric[i] = total_metric[i] / cnt[i]
-        #     val_metric_name = f"val_metric_{i}th_dataset"
-        #     self.log_dict({val_metric_name: val_metric[i]}, sync_dist=True)
-        # self.log_dict({"val_metric": np.sum(total_metric) / np.sum(cnt)}, sync_dist=True)
-        return 1
+        scores = do_eval_epoch_end(validation_step_outputs)
+        self.print(
+            f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
+        )
 
     @overrides
     def setup(self, stage):
@@ -426,7 +446,8 @@ val_dataset = SROIEBIODataset(
 
 # set env
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
-pl.utilities.seed.seed_everything(cfg.get("seed", 1), workers=True)
+seed_everything(cfg.seed)
+# pl.utilities.seed.seed_everything(cfg.get("seed", 1), workers=True)
 
 # make data module
 data_module = BROSDataPLModule(cfg)
@@ -437,6 +458,8 @@ data_module.val_dataset = val_dataset
 # Load BROS model
 bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
 bros_config.num_labels = len(train_dataset.bio_class_names) # 4 classes * 2 (Beginning, Inside) + 1 (Outside)
+cfg.model.n_classes = bros_config.num_labels
+
 bros_model = BrosForTokenClassification.from_pretrained(
     cfg.model.pretrained_model_name_or_path,
     config=bros_config
@@ -446,6 +469,7 @@ model_module.model = bros_model
 
 cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
 cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
+
 
 callbacks = get_callbacks(cfg)
 plugins = get_plugins(cfg)

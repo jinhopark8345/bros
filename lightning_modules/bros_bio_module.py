@@ -23,7 +23,6 @@ class BROSBIOModule(BROSModule):
 
     @overrides
     def training_step(self, batch, batch_idx, *args):
-        breakpoint()
         _, loss = self.net(batch)
 
         log_dict_input = {"train_loss": loss}
