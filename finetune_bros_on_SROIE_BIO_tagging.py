@@ -7,6 +7,7 @@ from overrides import overrides
 from omegaconf import OmegaConf
 
 import torch
+from torch.optim import SGD, Adam, AdamW
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 import pytorch_lightning as pl
@@ -33,7 +34,17 @@ from bros import BrosConfig
 
 from lightning_modules.bros_bio_module import do_eval_step, eval_ee_bio_batch, eval_ee_bio_example, parse_from_seq, do_eval_epoch_end
 
-breakpoint()
+from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
+from pytorch_lightning.utilities.distributed import rank_zero_only
+from torch.optim.lr_scheduler import LambdaLR
+
+from lightning_modules.schedulers import (
+    cosine_scheduler,
+    linear_scheduler,
+    multistep_scheduler,
+)
+from utils import cfg_to_hparams, get_specific_pl_logger
+
 
 
 class SROIEBIODataset(Dataset):
@@ -141,8 +152,6 @@ class SROIEBIODataset(Dataset):
         bbox[:, [0, 2, 4, 6]] = bbox[:, [0, 2, 4, 6]] / width
         bbox[:, [1, 3, 5, 7]] = bbox[:, [1, 3, 5, 7]] / height
 
-        breakpoint()
-
         # Label
         classes_dic = json_obj["parse"]["class"]
         for class_name in self.class_names:
@@ -204,8 +213,8 @@ class BROSDataPLModule(pl.LightningDataModule):
         super().__init__()
         self.cfg = cfg
 
-        self.train_batch_sizes = self.cfg.train.batch_size
-        self.val_batch_sizes = self.cfg.val.batch_size
+        self.train_batch_size = self.cfg.train.batch_size
+        self.val_batch_size = self.cfg.val.batch_size
         self.train_dataset = None
         self.val_dataset = None
 
@@ -250,59 +259,35 @@ class BROSModelPLModule(pl.LightningModule):
         self.cfg = cfg
         self.model = None
 
+        self.optimizer_types = {
+            "sgd": SGD,
+            "adam": Adam,
+            "adamw": AdamW,
+        }
 
-    def training_step(self, batch, batch_idx, *args):
-        breakpoint()
-        # image_tensors, decoder_input_ids, decoder_labels = list(), list(), list()
-        # for batch_data in batch:
-        #     image_tensors.append(batch_data[0])
-        #     decoder_input_ids.append(batch_data[1][:, :-1])
-        #     decoder_labels.append(batch_data[2][:, 1:])
-        # image_tensors = torch.cat(image_tensors)
-        # decoder_input_ids = torch.cat(decoder_input_ids)
-        # decoder_labels = torch.cat(decoder_labels)
-        # loss = self.model(image_tensors, decoder_input_ids, decoder_labels)[0]
-        # self.log_dict({"train_loss": loss}, sync_dist=True)
-        # return loss
-        return 1
 
     @overrides
-    def training_epoch_end(self, training_step_outputs):
-        avg_loss = torch.tensor(0.0).to(self.device)
-        for step_out in training_step_outputs:
-            avg_loss += step_out["loss"]
+    def training_step(self, batch, batch_idx, *args):
+        _, loss = self.net(batch)
 
-        log_dict = {"train_loss": avg_loss}
-        self._log_shell(log_dict, prefix="train ")
+        log_dict_input = {"train_loss": loss}
+        self.log_dict(log_dict_input, sync_dist=True)
+        return loss
 
-    def validation_step(self, batch, batch_idx, dataset_idx=0):
-        # image_tensors, decoder_input_ids, prompt_end_idxs, answers = batch
-        # decoder_prompts = pad_sequence(
-        #     [input_id[: end_idx + 1] for input_id, end_idx in zip(decoder_input_ids, prompt_end_idxs)],
-        #     batch_first=True,
-        # )
+    @torch.no_grad()
+    @overrides
+    def validation_step(self, batch, batch_idx, *args):
+        head_outputs, loss = self.net(batch)
+        step_out = do_eval_step(batch, head_outputs, loss, self.eval_kwargs)
+        return step_out
 
-        # preds = self.model.inference(
-        #     image_tensors=image_tensors,
-        #     prompt_tensors=decoder_prompts,
-        #     return_json=False,
-        #     return_attentions=False,
-        # )["predictions"]
-
-        # scores = list()
-        # for pred, answer in zip(preds, answers):
-        #     pred = re.sub(r"(?:(?<=>) | (?=</s_))", "", pred)
-        #     answer = re.sub(r"<.*?>", "", answer, count=1)
-        #     answer = answer.replace(self.model.decoder.tokenizer.eos_token, "")
-        #     scores.append(edit_distance(pred, answer) / max(len(pred), len(answer)))
-
-        #     if self.cfg.get("verbose", False) and len(scores) == 1:
-        #         self.print(f"Prediction: {pred}")
-        #         self.print(f"    Answer: {answer}")
-        #         self.print(f" Normed ED: {scores[0]}")
-
-        # return scores
-        return 1
+    @torch.no_grad()
+    @overrides
+    def validation_epoch_end(self, validation_step_outputs):
+        scores = do_eval_epoch_end(validation_step_outputs)
+        self.print(
+            f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
+        )
 
     def validation_epoch_end(self, validation_step_outputs):
         # num_of_loaders = len(self.cfg.dataset_name_or_paths)
@@ -373,7 +358,7 @@ class BROSModelPLModule(pl.LightningModule):
             raise ValueError(f"Unknown optimizer method={method}")
 
         kwargs = dict(opt_cfg.params)
-        kwargs["params"] = self.net.parameters()
+        kwargs["params"] = self.model.parameters()
         optimizer = self.optimizer_types[method](**kwargs)
 
         return optimizer
@@ -456,7 +441,7 @@ bros_model = BrosForTokenClassification.from_pretrained(
     cfg.model.pretrained_model_name_or_path,
     config=bros_config
 )
-model_module = BROSModelPLModule(cfg.train)
+model_module = BROSModelPLModule(cfg)
 model_module.model = bros_model
 
 cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
@@ -488,4 +473,3 @@ trainer = Trainer(
 )
 
 trainer.fit(model_module, data_module)
-breakpoint()
