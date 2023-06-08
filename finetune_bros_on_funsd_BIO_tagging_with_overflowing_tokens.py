@@ -3,8 +3,8 @@ from datasets import load_dataset, load_from_disk
 ### Load FUNSD dataset
 
 # dataset = load_dataset("nielsr/funsd")
-# dataset = load_dataset("nielsr/funsd-iob-original")
-dataset = load_from_disk("/home/jinho/Projects/bros/save/dataset")
+dataset = load_dataset("nielsr/funsd-iob-original")
+# dataset = load_from_disk("/home/jinho/Projects/bros/save/dataset")
 
 label_list = dataset["train"].features["ner_tags"].feature.names
 id2label = {id: label for id, label in enumerate(label_list)}
@@ -15,8 +15,8 @@ print(f'{dataset["train"].features} = ')
 
 ### Load Tokenizer
 from transformers import AutoTokenizer
-# tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-tokenizer = AutoTokenizer.from_pretrained("/home/jinho/Projects/bros/save/tokenizer")
+tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+# tokenizer = AutoTokenizer.from_pretrained("/home/jinho/Projects/bros/save/tokenizer")
 
 ### Add quad feature
 # The first thing we'll do is add a "quads" column to the dataset, which contains the quadratics per word (8 numbers).
@@ -153,8 +153,8 @@ eval_dataloader = DataLoader(
 
 from bros import BrosForTokenClassification
 
-# model = BrosForTokenClassification.from_pretrained("naver-clova-ocr/bros-base-uncased", id2label=id2label)
-model = BrosForTokenClassification.from_pretrained("/home/jinho/Projects/bros/save/model", id2label=id2label)
+model = BrosForTokenClassification.from_pretrained("naver-clova-ocr/bros-base-uncased", id2label=id2label)
+# model = BrosForTokenClassification.from_pretrained("/home/jinho/Projects/bros/save/model", id2label=id2label)
 
 import evaluate
 

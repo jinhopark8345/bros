@@ -4,13 +4,19 @@
 workspace: ./finetune_sroie_ee_bio__bros-base-uncased
 #workspace: ./finetune_sroie_ee_bio__layoutlm-base-uncased
 
+tokenizer_path: /Users/jinho/Projects/bros/saved_models
 dataset: jinho8345/bros-sroie
 task: ee
 
+seed: 1
+cudnn_deterministic: False
+cudnn_benchmark: True
+
 model:
-  backbone: naver-clova-ocr/bros-base-uncased
+  pretrained_model_name_or_path: /Users/jinho/Projects/bros/saved_models
+  # backbone: naver-clova-ocr/bros-base-uncased
   #backbone: microsoft/layoutlm-base-uncased
-  head: bio
+  max_seq_length: 512
 
 train:
   batch_size: 1
