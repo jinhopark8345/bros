@@ -11,11 +11,12 @@ Reference: https://github.com/microsoft/unilm/blob/master/layoutlm/deprecated/ex
 import json
 import os
 from collections import Counter
+from datasets import load_dataset
 
 from tqdm import tqdm
 from transformers import BertTokenizer
 
-MAX_SEQ_LENGTH = 512
+MAX_SEQ_LENGTH = 4000
 MODEL_TYPE = "bert"
 VOCA = "bert-base-uncased"
 
@@ -24,6 +25,7 @@ OUTPUT_PATH = "../../datasets/funsd"
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_PATH, "preprocessed"), exist_ok=True)
 
+max_len_poss = -1
 
 def main():
     for dataset_split in ["train", "val"]:
@@ -31,7 +33,7 @@ def main():
         do_2nd_preprocess(dataset_split)
 
     os.system(f"cp -r {os.path.join(INPUT_PATH, 'training_data')} {OUTPUT_PATH}")
-    os.system(f"cp -r {os.path.join(INPUT_PATH, 'testing_data')} {OUTPUT_PATH}")
+    os.system(f"cp -r {os.path.join(INPUT_PATH, 'validation_data')} {OUTPUT_PATH}")
     os.system(f"cp {os.path.join(INPUT_PATH, 'labels.txt')} {OUTPUT_PATH}")
 
 
@@ -40,20 +42,15 @@ def do_2nd_preprocess(dataset_split):
     labels = get_labels(label_fpath)
 
     tokenizer = BertTokenizer.from_pretrained(VOCA, do_lower_case=True)
-    cls_token_id = tokenizer.convert_tokens_to_ids("[CLS]")
-    sep_token_id = tokenizer.convert_tokens_to_ids("[SEP]")
-    pad_token_id = tokenizer.convert_tokens_to_ids("[PAD]")
+    cls_token_id = tokenizer.cls_token_id
+    sep_token_id = tokenizer.sep_token_id
+    pad_token_id = tokenizer.pad_token_id
     ignore_index = -100
 
-    if dataset_split == "train":
-        mode = "train"
-    elif dataset_split == "val":
-        mode = "test"
-    else:
-        raise ValueError(f"Invalid dataset_split={dataset_split}")
+    examples = load_dataset("jinho8345/bros-funsd-bies")[dataset_split]
+    # examples = read_examples_from_file(INPUT_PATH, mode)
 
-    examples = read_examples_from_file(INPUT_PATH, mode)
-
+    breakpoint()
     features = convert_examples_to_features(
         examples,
         labels,
@@ -81,11 +78,14 @@ def do_2nd_preprocess(dataset_split):
         # Feature: input_ids, input_mask, segment_ids, label_ids,
         #          boxes, actual_bboxes, file_name, page_size
 
+        file_name = example['file_name']
+        page_size = example['page_size']
+
         this_file_name = "{}_{}.json".format(
-            example.file_name[: example.file_name.rfind(".")],
-            image_cnter[example.file_name],
+            file_name[: file_name.rfind(".")],
+            image_cnter[file_name],
         )
-        image_cnter[example.file_name] += 1
+        image_cnter[file_name] += 1
 
         data_obj = {}
 
@@ -93,26 +93,29 @@ def do_2nd_preprocess(dataset_split):
         data_obj["meta"] = {}
         # data_obj["meta"]["image_size"]
         #     = example.page_size[::-1] + [3]  # [height, width, rgb?]
-        height, width = example.page_size[::-1]
+        height, width = page_size[::-1]
         data_obj["meta"]["imageSize"] = {"width": width, "height": height}
         data_obj["meta"]["voca"] = VOCA
 
-        if mode == "train":
+        if dataset_split == "train":
             data_obj["meta"]["image_path"] = os.path.join(
-                "training_data", "images", example.file_name
+                "training_data", "images", file_name
             )
-        elif mode == "test":
+        elif dataset_split == "val":
             data_obj["meta"]["image_path"] = os.path.join(
-                "testing_data", "images", example.file_name
+                "validation_data", "images", file_name
             )
-        else:
-            raise ValueError(f"Unknown mode={mode}")
 
         # words
         #   text, tokens, boundingBox
+
+        words = example['words']
+        actual_bboxes = example['actual_bboxes']
+
+
         data_obj["words"] = []
         this_input_ids = []
-        for word, bb in zip(example.words, example.actual_bboxes):
+        for word, bb in zip(words, actual_bboxes):
             word_tokens = []
             for splitted_word in word.split():
                 word_tokens.append(
@@ -179,99 +182,6 @@ def get_labels(path):
     return labels
 
 
-class InputExample(object):
-    """A single training/test example for token classification."""
-
-    def __init__(self, guid, words, labels, boxes, actual_bboxes, file_name, page_size):
-        """Constructs a InputExample.
-
-        Args:
-            guid: Unique id for the example.
-            words: list. The words of the sequence.
-            labels: (Optional) list. The labels for each word of the sequence. This should be
-            specified for train and dev examples, but not for test examples.
-        """
-        self.guid = guid
-        self.words = words
-        self.labels = labels
-        self.boxes = boxes
-        self.actual_bboxes = actual_bboxes
-        self.file_name = file_name
-        self.page_size = page_size
-
-
-def read_examples_from_file(data_dir, mode):
-    file_path = os.path.join(data_dir, "{}.txt".format(mode))
-    box_file_path = os.path.join(data_dir, "{}_box.txt".format(mode))
-    image_file_path = os.path.join(data_dir, "{}_image.txt".format(mode))
-    guid_index = 1
-    examples = []
-    with open(file_path, encoding="utf-8") as f, open(
-        box_file_path, encoding="utf-8"
-    ) as fb, open(image_file_path, encoding="utf-8") as fi:
-        words = []
-        boxes = []
-        actual_bboxes = []
-        file_name = None
-        page_size = None
-        labels = []
-        for line, bline, iline in zip(f, fb, fi):
-            if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                if words:
-                    examples.append(
-                        InputExample(
-                            guid="{}-{}".format(mode, guid_index),
-                            words=words,
-                            labels=labels,
-                            boxes=boxes,
-                            actual_bboxes=actual_bboxes,
-                            file_name=file_name,
-                            page_size=page_size,
-                        )
-                    )
-                    guid_index += 1
-                    words = []
-                    boxes = []
-                    actual_bboxes = []
-                    file_name = None
-                    page_size = None
-                    labels = []
-            else:
-                splits = line.split("\t")
-                bsplits = bline.split("\t")
-                isplits = iline.split("\t")
-                assert len(splits) == 2
-                assert len(bsplits) == 2
-                assert len(isplits) == 4
-                assert splits[0] == bsplits[0]
-                words.append(splits[0])
-                if len(splits) > 1:
-                    labels.append(splits[-1].replace("\n", ""))
-                    box = bsplits[-1].replace("\n", "")
-                    box = [int(b) for b in box.split()]
-                    boxes.append(box)
-                    actual_bbox = [int(b) for b in isplits[1].split()]
-                    actual_bboxes.append(actual_bbox)
-                    page_size = [int(i) for i in isplits[2].split()]
-                    file_name = isplits[3].strip()
-                else:
-                    # Examples could have no label for mode = "test"
-                    labels.append("O")
-        if words:
-            examples.append(
-                InputExample(
-                    guid="%s-%d".format(mode, guid_index),
-                    words=words,
-                    labels=labels,
-                    boxes=boxes,
-                    actual_bboxes=actual_bboxes,
-                    file_name=file_name,
-                    page_size=page_size,
-                )
-            )
-    return examples
-
-
 class InputFeatures(object):
     """A single set of features of data."""
 
@@ -299,7 +209,6 @@ class InputFeatures(object):
         self.actual_bboxes = actual_bboxes
         self.file_name = file_name
         self.page_size = page_size
-
 
 def convert_examples_to_features(
     examples,
@@ -332,8 +241,8 @@ def convert_examples_to_features(
 
     features = []
     for (ex_index, example) in enumerate(examples):
-        file_name = example.file_name
-        page_size = example.page_size
+        file_name = example[ "file_name" ]
+        page_size = example["page_size"]
         width, height = page_size
         # if ex_index % 10000 == 0:
         #     print("Writing example {} of {}".format(ex_index, len(examples)))
@@ -343,7 +252,7 @@ def convert_examples_to_features(
         actual_bboxes = []
         label_ids = []
         for word, label, box, actual_bbox in zip(
-            example.words, example.labels, example.boxes, example.actual_bboxes
+            example["words"], example["labels"], example["boxes"], example["actual_bboxes"]
         ):
             word_tokens = tokenizer.tokenize(word)
             tokens.extend(word_tokens)
@@ -356,6 +265,13 @@ def convert_examples_to_features(
 
         # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
         special_tokens_count = 3 if sep_token_extra else 2
+
+        global max_len_poss
+        ori = max_len_poss
+        max_len_poss = max(max_len_poss, len(tokens))
+        if ori < max_len_poss:
+            print(f'{max_len_poss = }')
+
         if len(tokens) > max_seq_length - special_tokens_count:
             tokens = tokens[: (max_seq_length - special_tokens_count)]
             token_boxes = token_boxes[: (max_seq_length - special_tokens_count)]
@@ -434,17 +350,6 @@ def convert_examples_to_features(
         assert len(label_ids) == max_seq_length
         assert len(token_boxes) == max_seq_length
 
-        # if ex_index < 5:
-        #     print("*** Example ***")
-        #     print("guid: {}".format(example.guid))
-        #     print("tokens: {}".format(" ".join([str(x) for x in tokens])))
-        #     print("input_ids: {}".format(" ".join([str(x) for x in input_ids])))
-        #     print("input_mask: {}".format(" ".join([str(x) for x in input_mask])))
-        #     print("segment_ids: {}".format(" ".join([str(x) for x in segment_ids])))
-        #     print("label_ids: {}".format(" ".join([str(x) for x in label_ids])))
-        #     print("boxes: {}".format(" ".join([str(x) for x in token_boxes])))
-        #     print("actual_bboxes: {}".format(" ".join([str(x) for x in actual_bboxes])))
-
         features.append(
             InputFeatures(
                 input_ids=input_ids,
@@ -462,3 +367,4 @@ def convert_examples_to_features(
 
 if __name__ == "__main__":
     main()
+
