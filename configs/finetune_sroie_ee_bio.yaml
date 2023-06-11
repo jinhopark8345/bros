@@ -24,7 +24,7 @@ train:
 
   clip_gradient_algorithm: norm
   clip_gradient_value: 1.0
-  num_workers: 0
+  num_workers: 4
 
   optimizer:
     method: adamw
@@ -39,5 +39,5 @@ train:
 
 val:
   batch_size: 1
-  num_workers: 0
+  num_workers: 4
   limit_val_batches: 1.0

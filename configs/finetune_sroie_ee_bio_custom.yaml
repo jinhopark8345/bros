@@ -4,7 +4,7 @@
 workspace: ./finetune_sroie_ee_bio__bros-base-uncased
 #workspace: ./finetune_sroie_ee_bio__layoutlm-base-uncased
 
-tokenizer_path: /Users/jinho/Projects/bros/saved_models
+tokenizer_path: naver-clova-ocr/bros-base-uncased
 dataset: jinho8345/bros-sroie
 task: ee
 
@@ -13,23 +13,23 @@ cudnn_deterministic: False
 cudnn_benchmark: True
 
 model:
-  pretrained_model_name_or_path: /Users/jinho/Projects/bros/saved_models
+  pretrained_model_name_or_path: naver-clova-ocr/bros-base-uncased
   # backbone: naver-clova-ocr/bros-base-uncased
   #backbone: microsoft/layoutlm-base-uncased
   max_seq_length: 512
 
 train:
-  batch_size: 1
+  batch_size: 16
   num_samples_per_epoch: 526
   max_epochs: 30  # 16 * 1000 / 526 = 30.42
   use_fp16: True
-  accelerator: cpu
+  accelerator: gpu
   strategy:
-    type: none
+    type: ddp
 
   clip_gradient_algorithm: norm
   clip_gradient_value: 1.0
-  num_workers: 0
+  num_workers: 4
 
   optimizer:
     method: adamw
@@ -43,6 +43,6 @@ train:
   val_interval: 1  # in epochs
 
 val:
-  batch_size: 1
-  num_workers: 0
+  batch_size: 8
+  num_workers: 4
   limit_val_batches: 1.0

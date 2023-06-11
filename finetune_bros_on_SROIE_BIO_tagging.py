@@ -67,8 +67,7 @@ class SROIEBIODataset(Dataset):
         self.sep_token_id = self.tokenizer.vocab["[SEP]"]
         self.unk_token_id = self.tokenizer.vocab["[UNK]"]
 
-        # self.examples = load_dataset(self.dataset, ignore_verifications=True)[mode]
-        self.examples = load_from_disk("/Users/jinho/Projects/hug_datasets/bros-sroie")[mode]
+        self.examples = load_dataset(self.dataset, ignore_verifications=True)[mode]
         self.class_names = list(self.examples['parse'][0]['class'].keys())
         self.class_idx_dic = dict(
             [(class_name, idx) for idx, class_name in enumerate(self.class_names)]
@@ -161,6 +160,8 @@ class SROIEBIODataset(Dataset):
                 continue
             if class_name not in classes_dic:
                 continue
+            if classes_dic[class_name] is None:
+                continue
 
             for word_list in classes_dic[class_name]:
                 # At first, connect the class and the first box
@@ -227,7 +228,7 @@ class BROSDataPLModule(pl.LightningDataModule):
         loader = DataLoader(
             dataset=self.train_dataset,
             batch_size=self.train_batch_size,
-            num_workers=self.cfg.num_workers,
+            num_workers=self.cfg.train.num_workers,
             pin_memory=True,
             worker_init_fn=self.seed_worker,
             generator=self.g,
@@ -267,6 +268,7 @@ class BROSModelPLModule(pl.LightningModule):
             "adamw": AdamW,
         }
         self.loss_func = nn.CrossEntropyLoss()
+        self.eval_kwargs = None
 
 
     def model_forward(self, batch):
@@ -308,7 +310,7 @@ class BROSModelPLModule(pl.LightningModule):
     @overrides
     def validation_step(self, batch, batch_idx, *args):
         head_outputs, loss = self.model_forward(batch)
-        step_out = do_eval_step(batch, head_outputs, loss, self.eval_kwargs)
+        step_out = do_eval_step(batch, head_outputs.logits, loss, self.eval_kwargs)
         return step_out
 
     @torch.no_grad()
@@ -394,6 +396,15 @@ class BROSModelPLModule(pl.LightningModule):
         if tb_logger:
             tb_logger.log_hyperparams(hparam_dict, metric_dict)
 
+    @overrides
+    def training_epoch_end(self, training_step_outputs):
+        avg_loss = torch.tensor(0.0).to(self.device)
+        for step_out in training_step_outputs:
+            avg_loss += step_out["loss"]
+
+        log_dict = {"train_loss": avg_loss}
+        self._log_shell(log_dict, prefix="train ")
+
     def _log_shell(self, log_info, prefix=""):
         log_info_shell = {}
         for k, v in log_info.items():
@@ -421,7 +432,7 @@ class BROSModelPLModule(pl.LightningModule):
 
 
 # Load Config
-config_path = "/Users/jinho/Projects/bros/configs/finetune_sroie_ee_bio_custom.yaml"
+config_path = "configs/finetune_sroie_ee_bio_custom.yaml"
 cfg = OmegaConf.load(config_path)
 print(cfg)
 
@@ -457,6 +468,7 @@ data_module.val_dataset = val_dataset
 
 # Load BROS model
 bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
+
 bros_config.num_labels = len(train_dataset.bio_class_names) # 4 classes * 2 (Beginning, Inside) + 1 (Outside)
 cfg.model.n_classes = bros_config.num_labels
 
@@ -466,6 +478,7 @@ bros_model = BrosForTokenClassification.from_pretrained(
 )
 model_module = BROSModelPLModule(cfg)
 model_module.model = bros_model
+model_module.eval_kwargs = {"class_names": train_dataset.class_names}
 
 cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
 cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
