@@ -67,7 +67,7 @@ class SROIEBIODataset(Dataset):
         self.sep_token_id = self.tokenizer.vocab["[SEP]"]
         self.unk_token_id = self.tokenizer.vocab["[UNK]"]
 
-        self.examples = load_dataset(self.dataset, ignore_verifications=True)[mode]
+        self.examples = load_dataset(self.dataset)[mode]
         self.class_names = list(self.examples['parse'][0]['class'].keys())
         self.class_idx_dic = dict(
             [(class_name, idx) for idx, class_name in enumerate(self.class_names)]
@@ -221,17 +221,13 @@ class BROSDataPLModule(pl.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
 
-        self.g = torch.Generator()
-        self.g.manual_seed(self.cfg.seed)
-
     def train_dataloader(self):
         loader = DataLoader(
             dataset=self.train_dataset,
             batch_size=self.train_batch_size,
             num_workers=self.cfg.train.num_workers,
             pin_memory=True,
-            worker_init_fn=self.seed_worker,
-            generator=self.g,
+            # worker_init_fn=self.seed_worker,
             shuffle=True,
         )
 
@@ -242,18 +238,20 @@ class BROSDataPLModule(pl.LightningDataModule):
         loader = DataLoader(
             dataset=self.val_dataset,
             batch_size=self.val_batch_size,
-            pin_memory=True,
+            num_workers=self.cfg.val.num_workers,
             shuffle=False,
+            pin_memory=True,
+            drop_last=False,
         )
 
         return loader
 
-
-    @staticmethod
-    def seed_worker(wordker_id):
-        worker_seed = torch.initial_seed() % 2 ** 32
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
+    @overrides
+    def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        for k in batch.keys():
+            if isinstance(batch[k], torch.Tensor):
+                batch[k] = batch[k].to(device)
+        return batch
 
 class BROSModelPLModule(pl.LightningModule):
 # class DonutModelPLModule(pl.LightningModule):
