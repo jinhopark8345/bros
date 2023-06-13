@@ -62,10 +62,10 @@ class SROIEBIODataset(Dataset):
         self.max_seq_length = max_seq_length
         self.mode = mode
 
-        self.pad_token_id = self.tokenizer.vocab["[PAD]"]
-        self.cls_token_id = self.tokenizer.vocab["[CLS]"]
-        self.sep_token_id = self.tokenizer.vocab["[SEP]"]
-        self.unk_token_id = self.tokenizer.vocab["[UNK]"]
+        self.pad_token_id = self.tokenizer.pad_token_id
+        self.cls_token_id = self.tokenizer.cls_token_id
+        self.sep_token_id = self.tokenizer.sep_token_id
+        self.unk_token_id = self.tokenizer.unk_token_id
 
         self.examples = load_dataset(self.dataset)[mode]
         self.class_names = list(self.examples['parse'][0]['class'].keys())
