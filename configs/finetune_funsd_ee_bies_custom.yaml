@@ -1,11 +1,11 @@
 # For workspace name
 # The checkpoint file location to be saved: {workspace}/checkpoints/
 # The log file location to be saved: {workspace}/tensorboard_logs/
-workspace: ./finetune_sroie_ee_bio__bros-base-uncased
-#workspace: ./finetune_sroie_ee_bio__layoutlm-base-uncased
+workspace: ./finetune_funsd_ee_bies__bros-base-uncased
+#workspace: ./finetune_funsd_ee_bies__layoutlm-base-uncased
 
 tokenizer_path: naver-clova-ocr/bros-base-uncased
-dataset: jinho8345/bros-sroie
+dataset: jinho8345/bros-funsd-bies
 task: ee
 
 seed: 1
