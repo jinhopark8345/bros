@@ -140,3 +140,7 @@ preprocess/funsd/__MACOSX/
 preprocess/funsd/dataset.zip
 preprocess/funsd_spade/dataset/
 
+finetune*
+dataset*
+preprocess/funsd/*
+save/*
