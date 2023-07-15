@@ -4,19 +4,19 @@ import os
 import numpy as np
 import time
 import yaml
+import datetime
 from overrides import overrides
 from omegaconf import OmegaConf
+from omegaconf.dictconfig import DictConfig
 
 import torch
 import torch.nn as nn
 from torch.optim import SGD, Adam, AdamW
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
-import pytorch_lightning as pl
 
 from datasets import load_dataset
 from datasets import load_from_disk
-from pytorch_lightning import Trainer
 from transformers import AutoTokenizer
 
 import math
@@ -24,12 +24,10 @@ import random
 import re
 from pathlib import Path
 
+import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_only
-from pytorch_lightning.utilities.seed import seed_everything
-from pytorch_lightning.utilities.distributed import rank_zero_only
-from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-from pytorch_lightning.plugins import DDPPlugin
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from torch.optim.lr_scheduler import LambdaLR
 
 from lightning_modules.schedulers import (
@@ -42,46 +40,46 @@ from bros.modeling_bros import BrosForTokenClassification
 from bros import BrosTokenizer
 from bros import BrosConfig
 
-class LastestModelCheckpoint(ModelCheckpoint):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+# class LastestModelCheckpoint(ModelCheckpoint):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
 
-    def on_train_epoch_end(self, trainer, pl_module):
-        """Save the latest model at every train epoch end."""
-        self.save_checkpoint(trainer)
-
-
-def get_plugins(cfg):
-    plugins = []
-
-    if cfg.train.strategy.type == "ddp":
-        plugins.append(DDPPlugin())
-
-    return plugins
-
-def get_loggers(cfg):
-    loggers = []
-
-    loggers.append(
-        TensorBoardLogger(
-            cfg.tensorboard_dir, name="", version="", default_hp_metric=False
-        )
-    )
-
-    return loggers
+#     def on_train_epoch_end(self, trainer, pl_module):
+#         """Save the latest model at every train epoch end."""
+#         self.save_checkpoint(trainer)
 
 
-def get_callbacks(cfg):
-    callbacks = []
+# def get_plugins(cfg):
+#     plugins = []
 
-    cb = LastestModelCheckpoint(
-        dirpath=cfg.save_weight_dir, save_top_k=0, save_last=True
-    )
-    cb.CHECKPOINT_NAME_LAST = "{epoch}-last"
-    cb.FILE_EXTENSION = ".pt"
-    callbacks.append(cb)
+#     if cfg.train.strategy.type == "ddp":
+#         plugins.append(DDPPlugin())
 
-    return callbacks
+#     return plugins
+
+# def get_loggers(cfg):
+#     loggers = []
+
+#     loggers.append(
+#         TensorBoardLogger(
+#             cfg.tensorboard_dir, name="", version="", default_hp_metric=False
+#         )
+#     )
+
+#     return loggers
+
+
+# def get_callbacks(cfg):
+#     callbacks = []
+
+#     cb = LastestModelCheckpoint(
+#         dirpath=cfg.save_weight_dir, save_top_k=0, save_last=True
+#     )
+#     cb.CHECKPOINT_NAME_LAST = "{epoch}-last"
+#     cb.FILE_EXTENSION = ".pt"
+#     callbacks.append(cb)
+
+#     return callbacks
 
 
 def cfg_to_hparams(cfg, hparam_dict, parent_str=""):
@@ -587,14 +585,18 @@ class BROSModelPLModule(pl.LightningModule):
         self.print(out_str, flush=True)
         self.time_tracker = time.time()
 
+    @rank_zero_only
+    def on_save_checkpoint(self, checkpoint):
+        breakpoint()
+        save_path = Path(self.config.result_path) / self.config.exp_name / self.config.exp_version
+        self.model.save_pretrained(save_path)
+        self.model.decoder.tokenizer.save_pretrained(save_path)
 
-# set env
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
-seed_everything(cfg.seed)
 
 # load training config
 finetune_sroie_ee_bio_config = {
-    "workspace": "./finetune_sroie_ee_bio__bros-base-uncased_from_dict_config2",
+    "workspace": "./finetune_sroie_ee_bio",
+    "exp_name": "bros-base-uncased_from_dict_config3",
     "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
     "dataset": "jinho8345/bros-sroie",
     "task": "ee",
@@ -606,7 +608,7 @@ finetune_sroie_ee_bio_config = {
         "max_seq_length": 512,
     },
     "train": {
-        "batch_size": 8,
+        "batch_size": 16,
         "num_samples_per_epoch": 526,
         "max_epochs": 30,
         "use_fp16": True,
@@ -629,9 +631,14 @@ finetune_sroie_ee_bio_config = {
 cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
 cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
 cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
+cfg.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # print config
 print(cfg)
+
+# set env
+os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
+pl.seed_everything(cfg.seed)
 
 # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
 tokenizer = BrosTokenizer.from_pretrained(cfg.tokenizer_path)
@@ -678,52 +685,93 @@ model_module.eval_kwargs = {"class_names": train_dataset.class_names}
 
 
 # define trainer callbacks, plugins, loggers
-callbacks = get_callbacks(cfg)
-plugins = get_plugins(cfg)
-loggers = get_loggers(cfg)
+# callbacks = get_callbacks(cfg)
+# plugins = get_plugins(cfg)
+# loggers = get_loggers(cfg)
+
+loggers = TensorBoardLogger(
+    save_dir=cfg.workspace,
+    name=cfg.exp_name,
+    version=cfg.exp_version,
+    default_hp_metric=False,
+)
+lr_callback = LearningRateMonitor(logging_interval="step")
+checkpoint_callback = ModelCheckpoint(
+    monitor="val_metric",
+    dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version,
+    filename="artifacts",
+    save_top_k=1,
+    save_last=False,
+    mode="min",
+)
 
 # define Trainer
-trainer = Trainer(
-    accelerator=cfg.train.accelerator,
+trainer = pl.Trainer(
+    resume_from_checkpoint=cfg.get("resume_from_checkpoint_path", None),
+    num_nodes=cfg.get("num_nodes", 1),
     gpus=torch.cuda.device_count(),
+    strategy="ddp",
+    accelerator=cfg.train.accelerator,
+
     max_epochs=cfg.train.max_epochs,
     gradient_clip_val=cfg.train.clip_gradient_value,
     gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
-    callbacks=callbacks,
-    plugins=plugins,
-    sync_batchnorm=True,
+    # plugins=plugins,
+
     precision=16 if cfg.train.use_fp16 else 32,
-    terminate_on_nan=False,
-    replace_sampler_ddp=False,
-    move_metrics_to_cpu=False,
-    progress_bar_refresh_rate=0,
-    check_val_every_n_epoch=cfg.train.val_interval,
     logger=loggers,
-    benchmark=cfg.cudnn_benchmark,
-    deterministic=cfg.cudnn_deterministic,
-    limit_val_batches=cfg.val.limit_val_batches,
+    callbacks=[lr_callback, checkpoint_callback],
+
+    # sync_batchnorm=True,
+    # terminate_on_nan=False,
+    # replace_sampler_ddp=False,
+    # move_metrics_to_cpu=False,
+    # progress_bar_refresh_rate=0,
+    # check_val_every_n_epoch=cfg.train.val_interval,
+    # benchmark=cfg.cudnn_benchmark,
+    # deterministic=cfg.cudnn_deterministic,
+    # limit_val_batches=cfg.val.limit_val_batches,
 )
 
 # train
 trainer.fit(model_module, data_module)
 
-# evalute
-step_outputs = []
-for example_idx, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
-    # Convert batch tensors to given device
-    for k in batch.keys():
-        if isinstance(batch[k], torch.Tensor):
-            batch[k] = batch[k].to(net.backbone.device)
+# finetuned_model = BrosForTokenClassification(bros_config)
 
-    with torch.no_grad():
-        head_outputs, loss = net(batch)
-    step_out = do_eval_step(batch, head_outputs, loss, eval_kwargs)
-    step_outputs.append(step_out)
+# def load_model_weight(model, pretrained_model_file):
+#     pretrained_model_state_dict = torch.load(pretrained_model_file, map_location="cpu")[
+#         "state_dict"
+#     ]
+#     new_state_dict = {}
+#     for k, v in pretrained_model_state_dict.items():
+#         new_k = k
+#         if new_k.startswith("net."):
+#             new_k = new_k[len("net.") :]
+#         new_state_dict[new_k] = v
+#     model.load_state_dict(new_state_dict)
 
-# Get scores
-scores = do_eval_epoch_end(step_outputs)
-print(
-    f"precision: {scores['precision']:.4f}, "
-    f"recall: {scores['recall']:.4f}, "
-    f"f1: {scores['f1']:.4f}"
-)
+
+# load_model_weight(finetuned_model, cfg.pretrained_model_file)
+
+# # load fine-tuned model
+
+# # evalute
+# step_outputs = []
+# for example_idx, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
+#     # Convert batch tensors to given device
+#     for k in batch.keys():
+#         if isinstance(batch[k], torch.Tensor):
+#             batch[k] = batch[k].to(finetuned_model.backbone.device)
+
+#     with torch.no_grad():
+#         head_outputs, loss = finetuned_model(batch)
+#     step_out = do_eval_step(batch, head_outputs, loss, eval_kwargs)
+#     step_outputs.append(step_out)
+
+# # Get scores
+# scores = do_eval_epoch_end(step_outputs)
+# print(
+#     f"precision: {scores['precision']:.4f}, "
+#     f"recall: {scores['recall']:.4f}, "
+#     f"f1: {scores['f1']:.4f}"
+# )
