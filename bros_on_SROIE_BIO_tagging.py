@@ -8,6 +8,7 @@ import datetime
 from overrides import overrides
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
+from pprint import pprint
 
 import torch
 import torch.nn as nn
@@ -39,63 +40,6 @@ from lightning_modules.schedulers import (
 from bros.modeling_bros import BrosForTokenClassification
 from bros import BrosTokenizer
 from bros import BrosConfig
-
-# class LastestModelCheckpoint(ModelCheckpoint):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-
-#     def on_train_epoch_end(self, trainer, pl_module):
-#         """Save the latest model at every train epoch end."""
-#         self.save_checkpoint(trainer)
-
-
-# def get_plugins(cfg):
-#     plugins = []
-
-#     if cfg.train.strategy.type == "ddp":
-#         plugins.append(DDPPlugin())
-
-#     return plugins
-
-# def get_loggers(cfg):
-#     loggers = []
-
-#     loggers.append(
-#         TensorBoardLogger(
-#             cfg.tensorboard_dir, name="", version="", default_hp_metric=False
-#         )
-#     )
-
-#     return loggers
-
-
-# def get_callbacks(cfg):
-#     callbacks = []
-
-#     cb = LastestModelCheckpoint(
-#         dirpath=cfg.save_weight_dir, save_top_k=0, save_last=True
-#     )
-#     cb.CHECKPOINT_NAME_LAST = "{epoch}-last"
-#     cb.FILE_EXTENSION = ".pt"
-#     callbacks.append(cb)
-
-#     return callbacks
-
-
-def cfg_to_hparams(cfg, hparam_dict, parent_str=""):
-    for key, val in cfg.items():
-        if isinstance(val, DictConfig):
-            hparam_dict = cfg_to_hparams(val, hparam_dict, parent_str + key + "__")
-        else:
-            hparam_dict[parent_str + key] = str(val)
-    return hparam_dict
-
-
-def get_specific_pl_logger(pl_loggers, logger_type):
-    for pl_logger in pl_loggers:
-        if isinstance(pl_logger, logger_type):
-            return pl_logger
-    return None
 
 
 class SROIEBIODataset(Dataset):
@@ -264,7 +208,6 @@ class BROSDataPLModule(pl.LightningDataModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-
         self.train_batch_size = self.cfg.train.batch_size
         self.val_batch_size = self.cfg.val.batch_size
         self.train_dataset = None
@@ -276,12 +219,10 @@ class BROSDataPLModule(pl.LightningDataModule):
             batch_size=self.train_batch_size,
             num_workers=self.cfg.train.num_workers,
             pin_memory=True,
-            # worker_init_fn=self.seed_worker,
             shuffle=True,
         )
 
         return loader
-
 
     def val_dataloader(self):
         loader = DataLoader(
@@ -301,51 +242,6 @@ class BROSDataPLModule(pl.LightningDataModule):
             if isinstance(batch[k], torch.Tensor):
                 batch[k] = batch[k].to(device)
         return batch
-
-def do_eval_step(batch, head_outputs, loss, eval_kwargs):
-    class_names = eval_kwargs["class_names"]
-
-    pr_labels = torch.argmax(head_outputs, -1)
-
-    n_batch_gt_classes, n_batch_pr_classes, n_batch_correct_classes = eval_ee_bio_batch(
-        pr_labels,
-        batch["bio_labels"],
-        batch["are_box_first_tokens"],
-        class_names,
-    )
-
-    step_out = {
-        "loss": loss,
-        "n_batch_gt_classes": n_batch_gt_classes,
-        "n_batch_pr_classes": n_batch_pr_classes,
-        "n_batch_correct_classes": n_batch_correct_classes,
-    }
-
-    return step_out
-
-
-def eval_ee_bio_batch(pr_labels, gt_labels, are_box_first_tokens, class_names):
-    n_batch_gt_classes, n_batch_pr_classes, n_batch_correct_classes = 0, 0, 0
-
-    bsz = pr_labels.shape[0]
-    for example_idx in range(bsz):
-        n_gt_classes, n_pr_classes, n_correct_classes = eval_ee_bio_example(
-            pr_labels[example_idx],
-            gt_labels[example_idx],
-            are_box_first_tokens[example_idx],
-            class_names,
-        )
-
-        n_batch_gt_classes += n_gt_classes
-        n_batch_pr_classes += n_pr_classes
-        n_batch_correct_classes += n_correct_classes
-
-    return (
-        n_batch_gt_classes,
-        n_batch_pr_classes,
-        n_batch_correct_classes,
-    )
-
 
 def eval_ee_bio_example(pr_seq, gt_seq, box_first_token_mask, class_names):
     valid_gt_seq = gt_seq[box_first_token_mask]
@@ -384,111 +280,105 @@ def parse_from_seq(seq, class_names):
 
     return parsed
 
-
-def do_eval_epoch_end(step_outputs):
-    n_total_gt_classes, n_total_pr_classes, n_total_correct_classes = 0, 0, 0
-
-    for step_out in step_outputs:
-        n_total_gt_classes += step_out["n_batch_gt_classes"]
-        n_total_pr_classes += step_out["n_batch_pr_classes"]
-        n_total_correct_classes += step_out["n_batch_correct_classes"]
-
-    precision = (
-        0.0 if n_total_pr_classes == 0 else n_total_correct_classes / n_total_pr_classes
-    )
-    recall = (
-        0.0 if n_total_gt_classes == 0 else n_total_correct_classes / n_total_gt_classes
-    )
-    f1 = (
-        0.0
-        if recall * precision == 0
-        else 2.0 * recall * precision / (recall + precision)
-    )
-
-    scores = {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
-
-    return scores
-
 class BROSModelPLModule(pl.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
         self.model = None
-
         self.optimizer_types = {
             "sgd": SGD,
             "adam": Adam,
             "adamw": AdamW,
         }
         self.loss_func = nn.CrossEntropyLoss()
-        self.eval_kwargs = None
+        self.class_names = None
+        self.tokenizer = tokenizer
 
+    def training_step(self, batch, batch_idx, *args):
 
-    def model_forward(self, batch):
-        input_ids = batch["input_ids"]
-        bbox = batch["bbox"]
-        attention_mask = batch["attention_mask"]
+        # unpack batch
+        input_ids = batch['input_ids']
+        bbox = batch['bbox']
+        attention_mask = batch['attention_mask']
+        box_first_token_mask = batch['are_box_first_tokens']
+        labels = batch['bio_labels']
 
-        head_outputs = self.model(
-            input_ids=input_ids, bbox=bbox, attention_mask=attention_mask
+        # inference model
+        output = self.model(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            box_first_token_mask=box_first_token_mask,
+            labels=labels
         )
 
-        loss = self._get_loss(head_outputs.logits, batch)
+        # log result
+        self.log_dict({"train_loss": output.loss}, sync_dist=True)
+        return output.loss
 
-        return head_outputs, loss
-
-    def _get_loss(self, head_outputs, batch):
-        # batch["are_box_first_tokens"] : [1, 512]
-        mask = batch["are_box_first_tokens"].view(-1) # [512]
-
-        # head_outputs : torch.Size([1, 512, 9])
-        logits = head_outputs.view(-1, self.cfg.model.n_classes) # [512, 9]
-        logits = logits[mask] # torch.Size([105, 9])
-
-        labels = batch["bio_labels"].view(-1) # torch.Size([512])
-        labels = labels[mask] # torch.Size([105])
-
-        loss = self.loss_func(logits, labels)
-
-        return loss
-
-    @overrides
-    def training_step(self, batch, batch_idx, *args):
-        _, loss = self.model_forward(batch)
-        log_dict_input = {"train_loss": loss}
-        self.log_dict(log_dict_input, sync_dist=True)
-        return loss
-
-    @torch.no_grad()
-    @overrides
     def validation_step(self, batch, batch_idx, *args):
-        head_outputs, loss = self.model_forward(batch)
-        step_out = do_eval_step(batch, head_outputs.logits, loss, self.eval_kwargs)
+
+        # unpack batch
+        input_ids = batch['input_ids']
+        bbox = batch['bbox']
+        attention_mask = batch['attention_mask']
+        are_box_first_tokens = batch['are_box_first_tokens']
+        gt_labels = batch['bio_labels']
+        labels = batch['bio_labels']
+
+        # inference model
+        output = self.model(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            box_first_token_mask=are_box_first_tokens,
+            labels=labels
+        )
+
+        pred_labels = torch.argmax(output.logits, -1)
+
+
+        n_batch_gt_classes, n_batch_pred_classes, n_batch_correct_classes = 0, 0, 0
+
+        batch_size = output.logits.shape[0]
+        for example_idx in range(batch_size):
+            n_gt_classes, n_pred_classes, n_correct_classes = eval_ee_bio_example(
+                pred_labels[example_idx],
+                gt_labels[example_idx],
+                are_box_first_tokens[example_idx],
+                self.class_names,
+            )
+
+            n_batch_gt_classes += n_gt_classes
+            n_batch_pred_classes += n_pred_classes
+            n_batch_correct_classes += n_correct_classes
+
+        step_out = {
+            "loss": output.loss,
+            "n_batch_gt_classes": n_batch_gt_classes,
+            "n_batch_pr_classes": n_batch_pred_classes,
+            "n_batch_correct_classes": n_batch_correct_classes,
+        }
+
         return step_out
 
-    @torch.no_grad()
-    @overrides
     def validation_epoch_end(self, validation_step_outputs):
-        scores = do_eval_epoch_end(validation_step_outputs)
-        self.print(
-            f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
-        )
+        n_total_gt_classes, n_total_pr_classes, n_total_correct_classes = 0, 0, 0
 
-    @torch.no_grad()
-    @overrides
-    def validation_epoch_end(self, validation_step_outputs):
-        scores = do_eval_epoch_end(validation_step_outputs)
-        self.print(
-            f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
-        )
+        for step_out in validation_step_outputs:
+            n_total_gt_classes += step_out["n_batch_gt_classes"]
+            n_total_pr_classes += step_out["n_batch_pr_classes"]
+            n_total_correct_classes += step_out["n_batch_correct_classes"]
 
-    @overrides
-    def setup(self, stage):
-        self.time_tracker = time.time()
+        precision = 0.0 if n_total_pr_classes == 0 else n_total_correct_classes / n_total_pr_classes
+        recall = 0.0 if n_total_gt_classes == 0 else n_total_correct_classes / n_total_gt_classes
+        f1 = 0.0 if recall * precision == 0 else 2.0 * recall * precision / (recall + precision)
+
+        self.log_dict({
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+        })
 
     @overrides
     def configure_optimizers(self):
@@ -542,55 +432,18 @@ class BROSModelPLModule(pl.LightningModule):
 
         return optimizer
 
-    @rank_zero_only
-    @overrides
-    def on_fit_end(self):
-        hparam_dict = cfg_to_hparams(self.cfg, {})
-        metric_dict = {"metric/dummy": 0}
-
-        tb_logger = get_specific_pl_logger(self.logger, TensorBoardLogger)
-
-        if tb_logger:
-            tb_logger.log_hyperparams(hparam_dict, metric_dict)
-
-    @overrides
-    def training_epoch_end(self, training_step_outputs):
-        avg_loss = torch.tensor(0.0).to(self.device)
-        for step_out in training_step_outputs:
-            avg_loss += step_out["loss"]
-
-        log_dict = {"train_loss": avg_loss}
-        self._log_shell(log_dict, prefix="train ")
-
-    def _log_shell(self, log_info, prefix=""):
-        log_info_shell = {}
-        for k, v in log_info.items():
-            new_v = v
-            if type(new_v) is torch.Tensor:
-                new_v = new_v.item()
-            log_info_shell[k] = new_v
-
-        out_str = prefix.upper()
-        if prefix.upper().strip() in ["TRAIN", "VAL"]:
-            out_str += f"[epoch: {self.current_epoch}/{self.cfg.train.max_epochs}]"
-
-        if self.training:
-            lr = self.trainer._lightning_optimizers[0].param_groups[0]["lr"]
-            log_info_shell["lr"] = lr
-
-        for key, value in log_info_shell.items():
-            out_str += f" || {key}: {round(value, 5)}"
-        out_str += f" || time: {round(time.time() - self.time_tracker, 1)}"
-        out_str += " secs."
-        self.print(out_str, flush=True)
-        self.time_tracker = time.time()
+    def get_progress_bar_dict(self):
+        items = super().get_progress_bar_dict()
+        items.pop("v_num", None)
+        items["exp_name"] = f"{self.cfg.get('exp_name', '')}"
+        items["exp_version"] = f"{self.cfg.get('exp_version', '')}"
+        return items
 
     @rank_zero_only
     def on_save_checkpoint(self, checkpoint):
-        breakpoint()
-        save_path = Path(self.config.result_path) / self.config.exp_name / self.config.exp_version
+        save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version
         self.model.save_pretrained(save_path)
-        self.model.decoder.tokenizer.save_pretrained(save_path)
+        self.tokenizer.save_pretrained(save_path)
 
 
 # load training config
@@ -633,8 +486,8 @@ cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
 cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
 cfg.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-# print config
-print(cfg)
+# pprint config
+pprint(cfg)
 
 # set env
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
@@ -681,7 +534,7 @@ bros_model = BrosForTokenClassification.from_pretrained(
 # model module setting
 model_module = BROSModelPLModule(cfg)
 model_module.model = bros_model
-model_module.eval_kwargs = {"class_names": train_dataset.class_names}
+model_module.class_names = train_dataset.class_names
 
 
 # define trainer callbacks, plugins, loggers
@@ -697,7 +550,7 @@ loggers = TensorBoardLogger(
 )
 lr_callback = LearningRateMonitor(logging_interval="step")
 checkpoint_callback = ModelCheckpoint(
-    monitor="val_metric",
+    monitor="f1",
     dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version,
     filename="artifacts",
     save_top_k=1,
@@ -716,21 +569,14 @@ trainer = pl.Trainer(
     max_epochs=cfg.train.max_epochs,
     gradient_clip_val=cfg.train.clip_gradient_value,
     gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
+
+    # fast_dev_run=True,
+    num_sanity_val_steps=3,
     # plugins=plugins,
 
     precision=16 if cfg.train.use_fp16 else 32,
     logger=loggers,
     callbacks=[lr_callback, checkpoint_callback],
-
-    # sync_batchnorm=True,
-    # terminate_on_nan=False,
-    # replace_sampler_ddp=False,
-    # move_metrics_to_cpu=False,
-    # progress_bar_refresh_rate=0,
-    # check_val_every_n_epoch=cfg.train.val_interval,
-    # benchmark=cfg.cudnn_benchmark,
-    # deterministic=cfg.cudnn_deterministic,
-    # limit_val_batches=cfg.val.limit_val_batches,
 )
 
 # train

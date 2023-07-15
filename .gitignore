@@ -144,3 +144,4 @@ finetune*
 dataset*
 preprocess/funsd/*
 save/*
+prev_result/*

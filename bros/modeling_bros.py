@@ -1720,6 +1720,7 @@ class BrosForTokenClassification(BrosPreTrainedModel):
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
+        box_first_token_mask=None,
         inputs_embeds=None,
         labels=None,
         output_attentions=None,
