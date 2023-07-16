@@ -1,0 +1,5 @@
+rich==13.4.2
+torch==2.0.1
+torchmetrics==1.0.1
+torchvision==0.15.2
+transformers==4.30.2

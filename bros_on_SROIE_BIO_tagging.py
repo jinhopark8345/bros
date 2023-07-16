@@ -17,6 +17,7 @@ from pprint import pprint
 
 import torch
 import torch.nn as nn
+from rich.progress import TextColumn
 from torch.optim import SGD, Adam, AdamW
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
@@ -31,6 +32,8 @@ import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.callbacks import RichProgressBar, RichModelSummary
+
 from pytorch_lightning.plugins import CheckpointIO
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -45,6 +48,19 @@ from bros import BrosTokenizer
 from bros import BrosConfig
 
 cnt = 0
+
+class CustomRichProgressBar(RichProgressBar):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+    def get_metrics(self, trainer, model):
+        items = super().get_metrics(trainer, model)
+        items.pop("v_num", None)
+        items["exp_name"] = self.cfg.get('exp_name', '')
+        items["exp_version"] = self.cfg.get('exp_version', '')
+        return items
+
 
 class CustomCheckpointIO(CheckpointIO):
     def save_checkpoint(self, checkpoint, path, storage_options=None):
@@ -317,6 +333,7 @@ class BROSModelPLModule(pl.LightningModule):
         self.loss_func = nn.CrossEntropyLoss()
         self.class_names = None
         self.tokenizer = tokenizer
+        self.validation_step_outputs = []
 
     def training_step(self, batch, batch_idx, *args):
         # unpack batch
@@ -373,21 +390,23 @@ class BROSModelPLModule(pl.LightningModule):
             n_batch_pred_classes += n_pred_classes
             n_batch_correct_classes += n_correct_classes
 
-            print(f'{n_correct_classes, n_pred_classes, n_gt_classes = }')
-
         step_out = {
-            "loss": prediction.loss,
+            "val_loss": prediction.loss,
             "n_batch_gt_classes": n_batch_gt_classes,
             "n_batch_pr_classes": n_batch_pred_classes,
             "n_batch_correct_classes": n_batch_correct_classes,
         }
 
+        self.validation_step_outputs.append(step_out)
+        self.log_dict(step_out, sync_dist=True)
         return step_out
 
-    def validation_epoch_end(self, validation_step_outputs):
+    def on_validation_epoch_end(self):
+        all_preds = self.validation_step_outputs
+
         n_total_gt_classes, n_total_pr_classes, n_total_correct_classes = 0, 0, 0
 
-        for step_out in validation_step_outputs:
+        for step_out in all_preds:
             n_total_gt_classes += step_out["n_batch_gt_classes"]
             n_total_pr_classes += step_out["n_batch_pr_classes"]
             n_total_correct_classes += step_out["n_batch_correct_classes"]
@@ -404,6 +423,8 @@ class BROSModelPLModule(pl.LightningModule):
             },
             sync_dist=True
         )
+
+        self.validation_step_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = self._get_optimizer()
@@ -457,20 +478,13 @@ class BROSModelPLModule(pl.LightningModule):
         return scheduler
 
 
-    def get_progress_bar_dict(self):
-        items = super().get_progress_bar_dict()
-        items.pop("v_num", None)
-        items["exp_name"] = f"{self.cfg.get('exp_name', '')}"
-        items["exp_version"] = f"{self.cfg.get('exp_version', '')}"
-        return items
-
-    @rank_zero_only
-    def on_save_checkpoint(self, checkpoint):
-        save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version
-        model_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'model'
-        tokenizer_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'tokenizer'
-        self.model.save_pretrained(model_save_path)
-        self.tokenizer.save_pretrained(tokenizer_save_path)
+    # @rank_zero_only
+    # def on_save_checkpoint(self, checkpoint):
+    #     save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version
+    #     model_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'model'
+    #     tokenizer_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'tokenizer'
+    #     self.model.save_pretrained(model_save_path)
+    #     self.tokenizer.save_pretrained(tokenizer_save_path)
 
 
 def train(cfg):
@@ -535,30 +549,42 @@ def train(cfg):
         default_hp_metric=False,
     )
     lr_callback = LearningRateMonitor(logging_interval="step")
+
+
     checkpoint_callback = ModelCheckpoint(
-        monitor="f1",
         dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version,
-        filename="artifacts",
-        save_top_k=1,
-        save_last=False,
-        mode="min",
+        filename='bros-sroie-{epoch:02d}-{val_loss:.2f}',
+        monitor='val_loss',
+        verbose=True,
+        save_last=True,
+        save_top_k=3,
     )
+
+    progressbar_callback = CustomRichProgressBar(cfg)
+    # progressbar_callback = RichProgressBar()
+
+    modelsummary_callback= RichModelSummary(max_depth=5)
+
+    # custom_ckpt = CustomCheckpointIO()
 
     # define Trainer
     trainer = pl.Trainer(
-        resume_from_checkpoint=cfg.get("resume_from_checkpoint_path", None),
-        num_nodes=cfg.get("num_nodes", 1),
-        gpus=torch.cuda.device_count(),
-        strategy="ddp",
         accelerator=cfg.train.accelerator,
-        max_epochs=cfg.train.max_epochs,
-        gradient_clip_val=cfg.train.clip_gradient_value,
-        gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
-        num_sanity_val_steps=3,
+        strategy="ddp_find_unused_parameters_true",
+        num_nodes=cfg.get("num_nodes", 1),
         precision=16 if cfg.train.use_fp16 else 32,
         logger=loggers,
-        # callbacks=[lr_callback, checkpoint_callback],
-        callbacks=[lr_callback, ],
+        callbacks=[
+            lr_callback,
+            checkpoint_callback,
+            progressbar_callback,
+            modelsummary_callback,
+        ],
+        max_epochs=cfg.train.max_epochs,
+        num_sanity_val_steps=3,
+        gradient_clip_val=cfg.train.clip_gradient_value,
+        gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
+        # plugins=custom_ckpt,
     )
 
 
@@ -575,11 +601,11 @@ def load_model_weight(model, pretrained_model_file):
 @torch.no_grad()
 def inference(cfg):
 
-    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_120236/model"
-    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_095716/tokenizer"
+    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_140548/checkpoints/epoch=9-step=329.ckpt"
+    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_140548/tokenizer"
     # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
-    tokenizer = BrosTokenizer.from_pretrained(pretrained_model_name_or_path=tokenizer_path)
     model = BrosForTokenClassification.from_pretrained(finetuned_model_path)
+    tokenizer = BrosTokenizer.from_pretrained(pretrained_model_name_or_path=tokenizer_path)
 
     device = 'cuda'
 
@@ -667,5 +693,5 @@ if __name__ == '__main__':
 
     # convert dictionary to omegaconf and update config
     cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
-    # train(cfg)
-    inference(cfg)
+    train(cfg)
+    # inference(cfg)
