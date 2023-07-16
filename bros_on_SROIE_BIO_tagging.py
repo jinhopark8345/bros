@@ -26,7 +26,6 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 from pytorch_lightning.plugins import CheckpointIO
 from pytorch_lightning.utilities import rank_zero_only
-from rich.progress import TextColumn
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
@@ -42,7 +41,6 @@ from lightning_modules.schedulers import (
     linear_scheduler,
     multistep_scheduler,
 )
-
 
 class SROIEBIODataset(Dataset):
     def __init__(
@@ -317,7 +315,7 @@ class BROSModelPLModule(pl.LightningModule):
         )
 
         loss = prediction.loss
-        self.log_dict({"train_loss": loss}, prog_bar=True)
+        self.log_dict({"train_loss": loss}, sync_dist=True, prog_bar=True)
 
         return loss
 
@@ -362,8 +360,8 @@ class BROSModelPLModule(pl.LightningModule):
         }
 
         self.validation_step_outputs.append(step_out)
-        self.log_dict({"val_loss": prediction.loss}, prog_bar=True)
-        self.log_dict(step_out)
+        self.log_dict({"val_loss": prediction.loss}, sync_dist=True, prog_bar=True)
+        self.log_dict(step_out, sync_dist=True)
 
         return step_out
 
@@ -458,19 +456,21 @@ class BROSModelPLModule(pl.LightningModule):
 
         return scheduler
 
-    def get_progress_bar_dict(self):
-        items = super().get_progress_bar_dict()
-        items.pop("v_num", None)
-        items["exp_name"] = f"{self.cfg.get('exp_name', '')}"
-        items["exp_version"] = f"{self.cfg.get('exp_version', '')}"
-        return items
-
-
     @rank_zero_only
     def on_save_checkpoint(self, checkpoint):
         save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version
-        model_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'huggingface_model'
-        tokenizer_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'huggingface_tokenizer'
+        model_save_path = (
+            Path(self.cfg.workspace)
+            / self.cfg.exp_name
+            / self.cfg.exp_version
+            / "huggingface_model"
+        )
+        tokenizer_save_path = (
+            Path(self.cfg.workspace)
+            / self.cfg.exp_name
+            / self.cfg.exp_version
+            / "huggingface_tokenizer"
+        )
         self.model.save_pretrained(model_save_path)
         self.tokenizer.save_pretrained(tokenizer_save_path)
 
@@ -480,8 +480,8 @@ def train(cfg):
     cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
     cfg.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # pprint config
-    pprint(cfg)
+    # pprint cfg
+    print(OmegaConf.to_yaml(cfg))
 
     # set env
     os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
@@ -540,15 +540,15 @@ def train(cfg):
     lr_callback = LearningRateMonitor(logging_interval="step")
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version / 'checkpoints',
+        dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version / "checkpoints",
         filename="bros-sroie-{epoch:02d}-{val_loss:.2f}",
         monitor="val_loss",
-        verbose=True,
+        # verbose=True,
         save_last=True,
-        save_top_k=1, # if you save more than 1 model,
-                      # then checkpoint and huggingface model are not guaranteed to be matching
-                      # because we are saving with huggingface model with save_pretrained method
-                      # in "on_save_checkpoint" method in "BROSModelPLModule"
+        save_top_k=1,  # if you save more than 1 model,
+        # then checkpoint and huggingface model are not guaranteed to be matching
+        # because we are saving with huggingface model with save_pretrained method
+        # in "on_save_checkpoint" method in "BROSModelPLModule"
     )
 
     modelsummary_callback = ModelSummary(max_depth=5)
@@ -563,8 +563,8 @@ def train(cfg):
         callbacks=[
             lr_callback,
             checkpoint_callback,
-            # progressbar_callback,
             modelsummary_callback,
+            progressbar_callback,
         ],
         max_epochs=cfg.train.max_epochs,
         num_sanity_val_steps=3,
@@ -577,8 +577,8 @@ def train(cfg):
 
 @torch.no_grad()
 def inference(cfg):
-    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_195439/huggingface_model"
-    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_195439/huggingface_tokenizer"
+    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230717_013105/huggingface_model"
+    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230717_013105/huggingface_tokenizer"
     # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
     model = BrosForTokenClassification.from_pretrained(finetuned_model_path)
     tokenizer = BrosTokenizer.from_pretrained(
