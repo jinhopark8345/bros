@@ -1720,9 +1720,9 @@ class BrosForTokenClassification(BrosPreTrainedModel):
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
-        box_first_token_mask=None,
         inputs_embeds=None,
         labels=None,
+        box_first_token_mask=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
@@ -1755,8 +1755,11 @@ class BrosForTokenClassification(BrosPreTrainedModel):
         logits = self.classifier(sequence_output)
 
         loss = None
-        if labels is not None:
+        if labels is not None and box_first_token_mask is not None:
             loss_fct = CrossEntropyLoss()
+
+            box_first_token_mask = box_first_token_mask.view(-1)
+
             # Only keep active parts of the loss
             if attention_mask is not None:
                 active_loss = attention_mask.view(-1) == 1
@@ -1766,9 +1769,15 @@ class BrosForTokenClassification(BrosPreTrainedModel):
                     labels.view(-1),
                     torch.tensor(loss_fct.ignore_index).type_as(labels),
                 )
-                loss = loss_fct(active_logits, active_labels)
+                loss = loss_fct(
+                    active_logits[box_first_token_mask],
+                    active_labels[box_first_token_mask]
+                )
             else:
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                loss = loss_fct(
+                    logits.view(-1, self.num_labels)[box_first_token_mask],
+                    labels.view(-1)[box_first_token_mask]
+                )
 
         if not return_dict:
             output = (logits,) + outputs[2:]

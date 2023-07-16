@@ -5,6 +5,11 @@ import numpy as np
 import time
 import yaml
 import datetime
+import math
+import random
+import re
+from tqdm import tqdm
+
 from overrides import overrides
 from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
@@ -20,15 +25,13 @@ from datasets import load_dataset
 from datasets import load_from_disk
 from transformers import AutoTokenizer
 
-import math
-import random
-import re
 from pathlib import Path
 
 import pytorch_lightning as pl
 from pytorch_lightning.utilities import rank_zero_only
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+from pytorch_lightning.plugins import CheckpointIO
 from torch.optim.lr_scheduler import LambdaLR
 
 from lightning_modules.schedulers import (
@@ -41,6 +44,21 @@ from bros.modeling_bros import BrosForTokenClassification
 from bros import BrosTokenizer
 from bros import BrosConfig
 
+cnt = 0
+
+class CustomCheckpointIO(CheckpointIO):
+    def save_checkpoint(self, checkpoint, path, storage_options=None):
+        del checkpoint["state_dict"]
+        torch.save(checkpoint, path)
+
+    def load_checkpoint(self, path, storage_options=None):
+        checkpoint = torch.load(path + "artifacts.ckpt")
+        state_dict = torch.load(path + "pytorch_model.bin")
+        checkpoint["state_dict"] = {"model." + key: value for key, value in state_dict.items()}
+        return checkpoint
+
+    def remove_checkpoint(self, path) -> None:
+        return super().remove_checkpoint(path)
 
 class SROIEBIODataset(Dataset):
     def __init__(
@@ -250,6 +268,12 @@ def eval_ee_bio_example(pr_seq, gt_seq, box_first_token_mask, class_names):
     gt_parse = parse_from_seq(valid_gt_seq, class_names)
     pr_parse = parse_from_seq(valid_pr_seq, class_names)
 
+    # global cnt
+    # cnt += 1
+
+    # if cnt > 1000:
+    #     breakpoint()
+
     n_gt_classes, n_pr_classes, n_correct_classes = 0, 0, 0
     for class_idx in range(len(class_names)):
         # Evaluate by ID
@@ -281,7 +305,7 @@ def parse_from_seq(seq, class_names):
     return parsed
 
 class BROSModelPLModule(pl.LightningModule):
-    def __init__(self, cfg):
+    def __init__(self, cfg, tokenizer):
         super().__init__()
         self.cfg = cfg
         self.model = None
@@ -295,7 +319,6 @@ class BROSModelPLModule(pl.LightningModule):
         self.tokenizer = tokenizer
 
     def training_step(self, batch, batch_idx, *args):
-
         # unpack batch
         input_ids = batch['input_ids']
         bbox = batch['bbox']
@@ -304,7 +327,7 @@ class BROSModelPLModule(pl.LightningModule):
         labels = batch['bio_labels']
 
         # inference model
-        output = self.model(
+        prediction = self.model(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
@@ -313,11 +336,10 @@ class BROSModelPLModule(pl.LightningModule):
         )
 
         # log result
-        self.log_dict({"train_loss": output.loss}, sync_dist=True)
-        return output.loss
+        self.log_dict({"train_loss": prediction.loss}, sync_dist=True)
+        return prediction.loss
 
     def validation_step(self, batch, batch_idx, *args):
-
         # unpack batch
         input_ids = batch['input_ids']
         bbox = batch['bbox']
@@ -327,7 +349,7 @@ class BROSModelPLModule(pl.LightningModule):
         labels = batch['bio_labels']
 
         # inference model
-        output = self.model(
+        prediction = self.model(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
@@ -335,12 +357,10 @@ class BROSModelPLModule(pl.LightningModule):
             labels=labels
         )
 
-        pred_labels = torch.argmax(output.logits, -1)
-
+        pred_labels = torch.argmax(prediction.logits, -1)
 
         n_batch_gt_classes, n_batch_pred_classes, n_batch_correct_classes = 0, 0, 0
-
-        batch_size = output.logits.shape[0]
+        batch_size = prediction.logits.shape[0]
         for example_idx in range(batch_size):
             n_gt_classes, n_pred_classes, n_correct_classes = eval_ee_bio_example(
                 pred_labels[example_idx],
@@ -353,8 +373,10 @@ class BROSModelPLModule(pl.LightningModule):
             n_batch_pred_classes += n_pred_classes
             n_batch_correct_classes += n_correct_classes
 
+            print(f'{n_correct_classes, n_pred_classes, n_gt_classes = }')
+
         step_out = {
-            "loss": output.loss,
+            "loss": prediction.loss,
             "n_batch_gt_classes": n_batch_gt_classes,
             "n_batch_pr_classes": n_batch_pred_classes,
             "n_batch_correct_classes": n_batch_correct_classes,
@@ -374,13 +396,15 @@ class BROSModelPLModule(pl.LightningModule):
         recall = 0.0 if n_total_gt_classes == 0 else n_total_correct_classes / n_total_gt_classes
         f1 = 0.0 if recall * precision == 0 else 2.0 * recall * precision / (recall + precision)
 
-        self.log_dict({
+        self.log_dict(
+            {
                 "precision": precision,
                 "recall": recall,
                 "f1": f1,
-        })
+            },
+            sync_dist=True
+        )
 
-    @overrides
     def configure_optimizers(self):
         optimizer = self._get_optimizer()
         scheduler = self._get_lr_scheduler(optimizer)
@@ -390,6 +414,19 @@ class BROSModelPLModule(pl.LightningModule):
             "interval": "step",
         }
         return [optimizer], [scheduler]
+
+    def _get_optimizer(self):
+        opt_cfg = self.cfg.train.optimizer
+        method = opt_cfg.method.lower()
+
+        if method not in self.optimizer_types:
+            raise ValueError(f"Unknown optimizer method={method}")
+
+        kwargs = dict(opt_cfg.params)
+        kwargs["params"] = self.model.parameters()
+        optimizer = self.optimizer_types[method](**kwargs)
+
+        return optimizer
 
     def _get_lr_scheduler(self, optimizer):
         cfg_train = self.cfg.train
@@ -419,18 +456,6 @@ class BROSModelPLModule(pl.LightningModule):
 
         return scheduler
 
-    def _get_optimizer(self):
-        opt_cfg = self.cfg.train.optimizer
-        method = opt_cfg.method.lower()
-
-        if method not in self.optimizer_types:
-            raise ValueError(f"Unknown optimizer method={method}")
-
-        kwargs = dict(opt_cfg.params)
-        kwargs["params"] = self.model.parameters()
-        optimizer = self.optimizer_types[method](**kwargs)
-
-        return optimizer
 
     def get_progress_bar_dict(self):
         items = super().get_progress_bar_dict()
@@ -442,182 +467,205 @@ class BROSModelPLModule(pl.LightningModule):
     @rank_zero_only
     def on_save_checkpoint(self, checkpoint):
         save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version
-        self.model.save_pretrained(save_path)
-        self.tokenizer.save_pretrained(save_path)
+        model_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'model'
+        tokenizer_save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version / 'tokenizer'
+        self.model.save_pretrained(model_save_path)
+        self.tokenizer.save_pretrained(tokenizer_save_path)
 
 
-# load training config
-finetune_sroie_ee_bio_config = {
-    "workspace": "./finetune_sroie_ee_bio",
-    "exp_name": "bros-base-uncased_from_dict_config3",
-    "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
-    "dataset": "jinho8345/bros-sroie",
-    "task": "ee",
-    "seed": 1,
-    "cudnn_deterministic": False,
-    "cudnn_benchmark": True,
-    "model": {
-        "pretrained_model_name_or_path": "naver-clova-ocr/bros-base-uncased",
-        "max_seq_length": 512,
-    },
-    "train": {
-        "batch_size": 16,
-        "num_samples_per_epoch": 526,
-        "max_epochs": 30,
-        "use_fp16": True,
-        "accelerator": "gpu",
-        "strategy": {"type": "ddp"},
-        "clip_gradient_algorithm": "norm",
-        "clip_gradient_value": 1.0,
-        "num_workers": 4,
-        "optimizer": {
-            "method": "adamw",
-            "params": {"lr": 5e-05},
-            "lr_schedule": {"method": "linear", "params": {"warmup_steps": 0}},
+def train(cfg):
+    cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
+    cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
+    cfg.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # pprint config
+    pprint(cfg)
+
+    # set env
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
+    pl.seed_everything(cfg.seed)
+
+    # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
+    tokenizer = BrosTokenizer.from_pretrained(cfg.tokenizer_path)
+
+    # prepare SROIE dataset
+    train_dataset = SROIEBIODataset(
+        dataset=cfg.dataset,
+        tokenizer=tokenizer,
+        max_seq_length=cfg.model.max_seq_length,
+        mode='train'
+    )
+    val_dataset = SROIEBIODataset(
+        dataset=cfg.dataset,
+        tokenizer=tokenizer,
+        max_seq_length=cfg.model.max_seq_length,
+        mode='val'
+    )
+
+    # make data module & update data_module train and val dataset
+    data_module = BROSDataPLModule(cfg)
+    data_module.train_dataset = train_dataset
+    data_module.val_dataset = val_dataset
+
+    # Load BROS config & pretrained model
+    bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
+
+    ## update model config
+    bros_config.num_labels = len(train_dataset.bio_class_names) # 4 classes * 2 (Beginning, Inside) + 1 (Outside)
+
+    ## update training config
+    cfg.model.n_classes = bros_config.num_labels
+
+    ## load pretrained model
+    bros_model = BrosForTokenClassification.from_pretrained(
+        cfg.model.pretrained_model_name_or_path,
+        config=bros_config
+    )
+
+    # model module setting
+    model_module = BROSModelPLModule(cfg, tokenizer=tokenizer)
+    model_module.model = bros_model
+    model_module.class_names = train_dataset.class_names
+
+    # define trainer logger, callbacks
+    loggers = TensorBoardLogger(
+        save_dir=cfg.workspace,
+        name=cfg.exp_name,
+        version=cfg.exp_version,
+        default_hp_metric=False,
+    )
+    lr_callback = LearningRateMonitor(logging_interval="step")
+    checkpoint_callback = ModelCheckpoint(
+        monitor="f1",
+        dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version,
+        filename="artifacts",
+        save_top_k=1,
+        save_last=False,
+        mode="min",
+    )
+
+    # define Trainer
+    trainer = pl.Trainer(
+        resume_from_checkpoint=cfg.get("resume_from_checkpoint_path", None),
+        num_nodes=cfg.get("num_nodes", 1),
+        gpus=torch.cuda.device_count(),
+        strategy="ddp",
+        accelerator=cfg.train.accelerator,
+        max_epochs=cfg.train.max_epochs,
+        gradient_clip_val=cfg.train.clip_gradient_value,
+        gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
+        num_sanity_val_steps=3,
+        precision=16 if cfg.train.use_fp16 else 32,
+        logger=loggers,
+        # callbacks=[lr_callback, checkpoint_callback],
+        callbacks=[lr_callback, ],
+    )
+
+
+    # train: fit model to the data
+    trainer.fit(model_module, data_module)
+
+
+def load_model_weight(model, pretrained_model_file):
+    state_dict = torch.load(os.path.join(pretrained_model_file, "artifacts.ckpt"))['state_dict']
+    state_dict = {k[len('model.'):]: v for k,v in state_dict.items() if k.startswith('model.')}
+    model.load_state_dict(state_dict)
+    return model
+
+@torch.no_grad()
+def inference(cfg):
+
+    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_120236/model"
+    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230716_095716/tokenizer"
+    # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
+    tokenizer = BrosTokenizer.from_pretrained(pretrained_model_name_or_path=tokenizer_path)
+    model = BrosForTokenClassification.from_pretrained(finetuned_model_path)
+
+    device = 'cuda'
+
+    dataset = SROIEBIODataset(
+        dataset=cfg.dataset,
+        tokenizer=tokenizer,
+        max_seq_length=cfg.model.max_seq_length,
+        mode='val'
+    )
+
+    if torch.cuda.is_available():
+        # model.half()
+        model.to(device)
+    model.eval()
+
+    idx2bio_class = {idx:cls for idx, cls in enumerate(dataset.bio_class_names)}
+
+    total_loss = 0
+    for idx, sample in tqdm(enumerate(dataset), total=len(dataset)):
+        input_ids = sample['input_ids'].unsqueeze(0).to(device)
+        bbox = sample['bbox'].unsqueeze(0).to(device)
+        attention_mask = sample['attention_mask'].unsqueeze(0).to(device)
+        box_first_token_mask = sample['are_box_first_tokens'].unsqueeze(0).to(device)
+        gt_labels = sample['bio_labels'].unsqueeze(0).to(device)
+
+        # Not necessary to use box_first_token_mask and labels when you inference unless you want get loss
+        prediction = model(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            box_first_token_mask=box_first_token_mask,
+            labels=gt_labels
+        )
+
+        total_loss += prediction.loss
+
+        gt_labels = gt_labels.view(-1)[attention_mask.view(-1) == 1]
+        gt_labels = [idx2bio_class[e] for e in gt_labels.cpu().numpy()]
+        tokenized_words = [tokenizer.decode([input_id]) for input_id in input_ids.cpu().numpy()[0]]
+
+        # prepare prediction result
+        pred_logits = prediction.logits.squeeze(0)[attention_mask.view(-1) == 1]
+        pred_labels = torch.argmax(pred_logits, -1).cpu().numpy()
+        pred_labels = [idx2bio_class[e] for e in pred_labels]
+
+    avg_loss = total_loss / len(dataset)
+    print(f'avg_loss: {avg_loss}.4f')
+
+
+if __name__ == '__main__':
+
+    # load training config
+    finetune_sroie_ee_bio_config = {
+        "workspace": "./finetune_sroie_ee_bio",
+        "exp_name": "bros-base-uncased_from_dict_config3",
+        "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
+        "dataset": "jinho8345/bros-sroie",
+        "task": "ee",
+        "seed": 1,
+        "cudnn_deterministic": False,
+        "cudnn_benchmark": True,
+        "model": {
+            "pretrained_model_name_or_path": "naver-clova-ocr/bros-base-uncased",
+            "max_seq_length": 512,
         },
-        "val_interval": 1,
-    },
-    "val": {"batch_size": 8, "num_workers": 4, "limit_val_batches": 1.0},
-}
+        "train": {
+            "batch_size": 16,
+            "num_samples_per_epoch": 526,
+            "max_epochs": 10,
+            "use_fp16": True,
+            "accelerator": "gpu",
+            "strategy": {"type": "ddp"},
+            "clip_gradient_algorithm": "norm",
+            "clip_gradient_value": 1.0,
+            "num_workers": 4,
+            "optimizer": {
+                "method": "adamw",
+                "params": {"lr": 5e-05},
+                "lr_schedule": {"method": "linear", "params": {"warmup_steps": 0}},
+            },
+            "val_interval": 1,
+        },
+        "val": {"batch_size": 8, "num_workers": 4, "limit_val_batches": 1.0},
+    }
 
-# convert dictionary to omegaconf and update config
-cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
-cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
-cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
-cfg.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# pprint config
-pprint(cfg)
-
-# set env
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
-pl.seed_everything(cfg.seed)
-
-# Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
-tokenizer = BrosTokenizer.from_pretrained(cfg.tokenizer_path)
-
-# Load SROIE dataset
-train_dataset = SROIEBIODataset(
-    dataset=cfg.dataset,
-    tokenizer=tokenizer,
-    max_seq_length=cfg.model.max_seq_length,
-    mode='train'
-)
-
-val_dataset = SROIEBIODataset(
-    dataset=cfg.dataset,
-    tokenizer=tokenizer,
-    max_seq_length=cfg.model.max_seq_length,
-    mode='val'
-)
-
-# make data module & update data_module train and val dataset
-data_module = BROSDataPLModule(cfg)
-data_module.train_dataset = train_dataset
-data_module.val_dataset = val_dataset
-
-# Load BROS config & pretrained model
-bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
-
-## update model config
-bros_config.num_labels = len(train_dataset.bio_class_names) # 4 classes * 2 (Beginning, Inside) + 1 (Outside)
-
-## update training config
-cfg.model.n_classes = bros_config.num_labels
-
-## load pretrained model
-bros_model = BrosForTokenClassification.from_pretrained(
-    cfg.model.pretrained_model_name_or_path,
-    config=bros_config
-)
-
-# model module setting
-model_module = BROSModelPLModule(cfg)
-model_module.model = bros_model
-model_module.class_names = train_dataset.class_names
-
-
-# define trainer callbacks, plugins, loggers
-# callbacks = get_callbacks(cfg)
-# plugins = get_plugins(cfg)
-# loggers = get_loggers(cfg)
-
-loggers = TensorBoardLogger(
-    save_dir=cfg.workspace,
-    name=cfg.exp_name,
-    version=cfg.exp_version,
-    default_hp_metric=False,
-)
-lr_callback = LearningRateMonitor(logging_interval="step")
-checkpoint_callback = ModelCheckpoint(
-    monitor="f1",
-    dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version,
-    filename="artifacts",
-    save_top_k=1,
-    save_last=False,
-    mode="min",
-)
-
-# define Trainer
-trainer = pl.Trainer(
-    resume_from_checkpoint=cfg.get("resume_from_checkpoint_path", None),
-    num_nodes=cfg.get("num_nodes", 1),
-    gpus=torch.cuda.device_count(),
-    strategy="ddp",
-    accelerator=cfg.train.accelerator,
-
-    max_epochs=cfg.train.max_epochs,
-    gradient_clip_val=cfg.train.clip_gradient_value,
-    gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
-
-    # fast_dev_run=True,
-    num_sanity_val_steps=3,
-    # plugins=plugins,
-
-    precision=16 if cfg.train.use_fp16 else 32,
-    logger=loggers,
-    callbacks=[lr_callback, checkpoint_callback],
-)
-
-# train
-trainer.fit(model_module, data_module)
-
-# finetuned_model = BrosForTokenClassification(bros_config)
-
-# def load_model_weight(model, pretrained_model_file):
-#     pretrained_model_state_dict = torch.load(pretrained_model_file, map_location="cpu")[
-#         "state_dict"
-#     ]
-#     new_state_dict = {}
-#     for k, v in pretrained_model_state_dict.items():
-#         new_k = k
-#         if new_k.startswith("net."):
-#             new_k = new_k[len("net.") :]
-#         new_state_dict[new_k] = v
-#     model.load_state_dict(new_state_dict)
-
-
-# load_model_weight(finetuned_model, cfg.pretrained_model_file)
-
-# # load fine-tuned model
-
-# # evalute
-# step_outputs = []
-# for example_idx, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
-#     # Convert batch tensors to given device
-#     for k in batch.keys():
-#         if isinstance(batch[k], torch.Tensor):
-#             batch[k] = batch[k].to(finetuned_model.backbone.device)
-
-#     with torch.no_grad():
-#         head_outputs, loss = finetuned_model(batch)
-#     step_out = do_eval_step(batch, head_outputs, loss, eval_kwargs)
-#     step_outputs.append(step_out)
-
-# # Get scores
-# scores = do_eval_epoch_end(step_outputs)
-# print(
-#     f"precision: {scores['precision']:.4f}, "
-#     f"recall: {scores['recall']:.4f}, "
-#     f"f1: {scores['f1']:.4f}"
-# )
+    # convert dictionary to omegaconf and update config
+    cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
+    # train(cfg)
+    inference(cfg)
