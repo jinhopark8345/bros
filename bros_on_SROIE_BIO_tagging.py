@@ -43,36 +43,6 @@ from lightning_modules.schedulers import (
     multistep_scheduler,
 )
 
-class CustomProgressBar(TQDMProgressBar):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-
-    def get_metrics(self, trainer, model):
-        items = super().get_metrics(trainer, model)
-        breakpoint()
-        items.pop("v_num", None)
-        items["exp_name"] = self.cfg.get("exp_name", "")
-        items["exp_version"] = self.cfg.get("exp_version", "")
-        return items
-
-
-class CustomCheckpointIO(CheckpointIO):
-    def save_checkpoint(self, checkpoint, path, storage_options=None):
-        del checkpoint["state_dict"]
-        torch.save(checkpoint, path)
-
-    def load_checkpoint(self, path, storage_options=None):
-        checkpoint = torch.load(path + "artifacts.ckpt")
-        state_dict = torch.load(path + "pytorch_model.bin")
-        checkpoint["state_dict"] = {
-            "model." + key: value for key, value in state_dict.items()
-        }
-        return checkpoint
-
-    def remove_checkpoint(self, path) -> None:
-        return super().remove_checkpoint(path)
-
 
 class SROIEBIODataset(Dataset):
     def __init__(
@@ -346,9 +316,10 @@ class BROSModelPLModule(pl.LightningModule):
             labels=labels,
         )
 
-        # log result
-        self.log_dict({"train_loss": prediction.loss}, sync_dist=True)
-        return prediction.loss
+        loss = prediction.loss
+        self.log_dict({"train_loss": loss}, prog_bar=True)
+
+        return loss
 
     def validation_step(self, batch, batch_idx, *args):
         # unpack batch
@@ -385,14 +356,15 @@ class BROSModelPLModule(pl.LightningModule):
             n_batch_correct_classes += n_correct_classes
 
         step_out = {
-            "val_loss": prediction.loss,
             "n_batch_gt_classes": n_batch_gt_classes,
             "n_batch_pr_classes": n_batch_pred_classes,
             "n_batch_correct_classes": n_batch_correct_classes,
         }
 
         self.validation_step_outputs.append(step_out)
-        self.log_dict(step_out, sync_dist=True)
+        self.log_dict({"val_loss": prediction.loss}, prog_bar=True)
+        self.log_dict(step_out)
+
         return step_out
 
     def test_step(self, batch, batch_idx, *args):
@@ -486,6 +458,14 @@ class BROSModelPLModule(pl.LightningModule):
 
         return scheduler
 
+    def get_progress_bar_dict(self):
+        items = super().get_progress_bar_dict()
+        items.pop("v_num", None)
+        items["exp_name"] = f"{self.cfg.get('exp_name', '')}"
+        items["exp_version"] = f"{self.cfg.get('exp_version', '')}"
+        return items
+
+
     @rank_zero_only
     def on_save_checkpoint(self, checkpoint):
         save_path = Path(self.cfg.workspace) / self.cfg.exp_name / self.cfg.exp_version
@@ -571,10 +551,9 @@ def train(cfg):
                       # in "on_save_checkpoint" method in "BROSModelPLModule"
     )
 
-    progressbar_callback = CustomProgressBar(cfg)
     modelsummary_callback = ModelSummary(max_depth=5)
 
-    # define Trainer
+    # define Trainer and start training
     trainer = pl.Trainer(
         accelerator=cfg.train.accelerator,
         strategy="ddp_find_unused_parameters_true",
@@ -584,7 +563,7 @@ def train(cfg):
         callbacks=[
             lr_callback,
             checkpoint_callback,
-            progressbar_callback,
+            # progressbar_callback,
             modelsummary_callback,
         ],
         max_epochs=cfg.train.max_epochs,
@@ -593,19 +572,7 @@ def train(cfg):
         gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
     )
 
-    # train: fit model to the data
     trainer.fit(model_module, data_module)
-
-
-def load_model_weight(model, pretrained_model_file):
-    state_dict = torch.load(os.path.join(pretrained_model_file, "artifacts.ckpt"))[
-        "state_dict"
-    ]
-    state_dict = {
-        k[len("model.") :]: v for k, v in state_dict.items() if k.startswith("model.")
-    }
-    model.load_state_dict(state_dict)
-    return model
 
 
 @torch.no_grad()
