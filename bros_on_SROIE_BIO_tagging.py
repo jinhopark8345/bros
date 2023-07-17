@@ -6,6 +6,7 @@ import os
 import random
 import re
 import time
+from copy import deepcopy
 from pathlib import Path
 from pprint import pprint
 
@@ -41,6 +42,7 @@ from lightning_modules.schedulers import (
     linear_scheduler,
     multistep_scheduler,
 )
+
 
 class SROIEBIODataset(Dataset):
     def __init__(
@@ -244,23 +246,6 @@ class BROSDataPLModule(pl.LightningDataModule):
         return batch
 
 
-def eval_ee_bio_example(pr_seq, gt_seq, box_first_token_mask, class_names):
-    valid_gt_seq = gt_seq[box_first_token_mask]
-    valid_pr_seq = pr_seq[box_first_token_mask]
-
-    gt_parse = parse_from_seq(valid_gt_seq, class_names)
-    pr_parse = parse_from_seq(valid_pr_seq, class_names)
-
-    n_gt_classes, n_pr_classes, n_correct_classes = 0, 0, 0
-    for class_idx in range(len(class_names)):
-        # Evaluate by ID
-        n_gt_classes += len(gt_parse[class_idx])
-        n_pr_classes += len(pr_parse[class_idx])
-        n_correct_classes += len(gt_parse[class_idx] & pr_parse[class_idx])
-
-    return n_gt_classes, n_pr_classes, n_correct_classes
-
-
 def parse_from_seq(seq, class_names):
     parsed = [[] for _ in range(len(class_names))]
     for i, label_id_tensor in enumerate(seq):
@@ -294,6 +279,7 @@ class BROSModelPLModule(pl.LightningModule):
         }
         self.loss_func = nn.CrossEntropyLoss()
         self.class_names = None
+        self.bio_class_names = None
         self.tokenizer = tokenizer
         self.validation_step_outputs = []
 
@@ -341,17 +327,93 @@ class BROSModelPLModule(pl.LightningModule):
 
         n_batch_gt_classes, n_batch_pred_classes, n_batch_correct_classes = 0, 0, 0
         batch_size = prediction.logits.shape[0]
-        for example_idx in range(batch_size):
-            n_gt_classes, n_pred_classes, n_correct_classes = eval_ee_bio_example(
-                pred_labels[example_idx],
-                gt_labels[example_idx],
-                are_box_first_tokens[example_idx],
-                self.class_names,
+
+        for example_idx, (pred_label, gt_label, box_first_token_mask) in enumerate(
+            zip(pred_labels, gt_labels, are_box_first_tokens)
+        ):
+            # we only care about box_first_token indices
+            # select labels of box_first_token
+            valid_gt_label = gt_label[box_first_token_mask]
+            valid_pred_label = pred_label[box_first_token_mask]
+
+            """
+            collect indices with same classes (ignore Outside ('O') class
+            for example,
+
+            (Pdb++) valid_gt_label
+            tensor([3, 4, 4, 4, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0], device='cuda:0')
+
+            --> after parse
+
+            (Pdb++) gt_parse
+            [{(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)}, {(0, 1, 2, 3)}, {(45,)}, {(113,)}]
+            """
+
+            gt_parse = parse_from_seq(valid_gt_label, self.class_names)
+            pred_parse = parse_from_seq(valid_pred_label, self.class_names)
+
+            n_gt_classes = sum(
+                [len(gt_parse[class_idx]) for class_idx in range(len(self.class_names))]
             )
+            n_pred_classes = sum(
+                [
+                    len(pred_parse[class_idx])
+                    for class_idx in range(len(self.class_names))
+                ]
+            )
+            n_correct_classes = sum(
+                [
+                    len(gt_parse[class_idx] & pred_parse[class_idx])
+                    for class_idx in range(len(self.class_names))
+                ]
+            )
+
+            pred_cls2text = {name: [] for name in self.class_names}
+            gt_cls2text = deepcopy(pred_cls2text)
+            correct_cls2text = deepcopy(pred_cls2text)
+            incorrect_cls2text = deepcopy(pred_cls2text)
+
+            for cls_idx, cls_name in enumerate(self.class_names):
+                # all pred text for cls
+                for indices in pred_parse[cls_idx]:
+                    pred_cls_input_ids = input_ids[example_idx][torch.tensor(indices)]
+                    pred_text = self.tokenizer.decode(pred_cls_input_ids)
+                    pred_cls2text[cls_name].append(pred_text)
+                # all gt text for cls
+                for indices in gt_parse[cls_idx]:
+                    gt_cls_input_ids = input_ids[example_idx][torch.tensor(indices)]
+                    gt_text = self.tokenizer.decode(gt_cls_input_ids)
+                    gt_cls2text[cls_name].append(gt_text)
+
+                # all correct text for cls
+                for indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
+                    correct_cls_input_ids = input_ids[example_idx][
+                        torch.tensor(indices)
+                    ]
+                    correct_text = self.tokenizer.decode(correct_cls_input_ids)
+                    correct_cls2text[cls_name].append(correct_text)
+
+                # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
+                for indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
+                    diff_cls_input_ids = input_ids[example_idx][torch.tensor(indices)]
+                    diff_text = self.tokenizer.decode(diff_cls_input_ids)
+                    incorrect_cls2text[cls_name].append(diff_text)
 
             n_batch_gt_classes += n_gt_classes
             n_batch_pred_classes += n_pred_classes
             n_batch_correct_classes += n_correct_classes
+
+        print(f"{pred_cls2text = }")
+        print(f"{gt_cls2text = }")
+        print(f"{correct_cls2text = }")
+        print(f"{incorrect_cls2text = }")
 
         step_out = {
             "n_batch_gt_classes": n_batch_gt_classes,
@@ -510,15 +572,13 @@ def train(cfg):
     data_module.val_dataset = val_dataset
 
     # Load BROS config & pretrained model
+    ## update config
     bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
-
-    ## update model config
-    bros_config.num_labels = len(
-        train_dataset.bio_class_names
-    )  # 4 classes * 2 (Beginning, Inside) + 1 (Outside)
-
-    ## update training config
-    cfg.model.n_classes = bros_config.num_labels
+    bio_class_names = train_dataset.bio_class_names
+    id2label = {idx: name for idx, name in enumerate(bio_class_names)}
+    label2id = {name: idx for idx, name in id2label.items()}
+    bros_config.id2label = id2label
+    bros_config.label2id = label2id
 
     ## load pretrained model
     bros_model = BrosForTokenClassification.from_pretrained(
@@ -529,6 +589,7 @@ def train(cfg):
     model_module = BROSModelPLModule(cfg, tokenizer=tokenizer)
     model_module.model = bros_model
     model_module.class_names = train_dataset.class_names
+    model_module.bio_class_names = train_dataset.bio_class_names
 
     # define trainer logger, callbacks
     loggers = TensorBoardLogger(
@@ -564,7 +625,6 @@ def train(cfg):
             lr_callback,
             checkpoint_callback,
             modelsummary_callback,
-            progressbar_callback,
         ],
         max_epochs=cfg.train.max_epochs,
         num_sanity_val_steps=3,
@@ -655,7 +715,7 @@ if __name__ == "__main__":
         "train": {
             "batch_size": 16,
             "num_samples_per_epoch": 526,
-            "max_epochs": 6,
+            "max_epochs": 30,
             "use_fp16": True,
             "accelerator": "gpu",
             "strategy": {"type": "ddp"},
