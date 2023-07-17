@@ -23,10 +23,13 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     ModelSummary,
     TQDMProgressBar,
+    EarlyStopping,
 )
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
+
 from pytorch_lightning.plugins import CheckpointIO
 from pytorch_lightning.utilities import rank_zero_only
+
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
@@ -604,15 +607,14 @@ def train(cfg):
         dirpath=Path(cfg.workspace) / cfg.exp_name / cfg.exp_version / "checkpoints",
         filename="bros-sroie-{epoch:02d}-{val_loss:.2f}",
         monitor="val_loss",
-        # verbose=True,
-        save_last=True,
         save_top_k=1,  # if you save more than 1 model,
         # then checkpoint and huggingface model are not guaranteed to be matching
         # because we are saving with huggingface model with save_pretrained method
         # in "on_save_checkpoint" method in "BROSModelPLModule"
     )
 
-    modelsummary_callback = ModelSummary(max_depth=5)
+    model_summary_callback = ModelSummary(max_depth=5)
+    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=False, mode="max")
 
     # define Trainer and start training
     trainer = pl.Trainer(
@@ -624,7 +626,8 @@ def train(cfg):
         callbacks=[
             lr_callback,
             checkpoint_callback,
-            modelsummary_callback,
+            model_summary_callback,
+            early_stop_callback,
         ],
         max_epochs=cfg.train.max_epochs,
         num_sanity_val_steps=3,
@@ -735,4 +738,4 @@ if __name__ == "__main__":
     # convert dictionary to omegaconf and update config
     cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
     train(cfg)
-    inference(cfg)
+    # inference(cfg)
