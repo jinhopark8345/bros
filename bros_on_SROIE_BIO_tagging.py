@@ -577,8 +577,8 @@ def train(cfg):
 
 @torch.no_grad()
 def inference(cfg):
-    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230717_013105/huggingface_model"
-    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230717_013105/huggingface_tokenizer"
+    finetuned_model_path = "./finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230717_013105/huggingface_model"
+    tokenizer_path = "./finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230717_013105/huggingface_tokenizer"
     # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
     model = BrosForTokenClassification.from_pretrained(finetuned_model_path)
     tokenizer = BrosTokenizer.from_pretrained(
@@ -675,4 +675,4 @@ if __name__ == "__main__":
     # convert dictionary to omegaconf and update config
     cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
     train(cfg)
-    # inference(cfg)
+    inference(cfg)
