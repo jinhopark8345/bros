@@ -442,9 +442,6 @@ class BROSModelPLModule(pl.LightningModule):
 
         return step_out
 
-    def test_step(self, batch, batch_idx, *args):
-        ...
-
     def on_validation_epoch_end(self):
         all_preds = self.validation_step_outputs
 
@@ -652,8 +649,9 @@ def train(cfg):
 
 @torch.no_grad()
 def inference(cfg):
-    finetuned_model_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230721_010145/huggingface_model"
-    tokenizer_path = "/home/jinho/Projects/bros/finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230721_010145/huggingface_tokenizer"
+    finetuned_model_path = "finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230721_010145/huggingface_model"
+    tokenizer_path = "finetune_sroie_ee_bio/bros-base-uncased_from_dict_config3/20230721_010145/huggingface_tokenizer"
+
     # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
     model = BrosForTokenClassification.from_pretrained(finetuned_model_path)
     tokenizer = BrosTokenizer.from_pretrained(
