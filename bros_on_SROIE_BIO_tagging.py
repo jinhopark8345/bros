@@ -392,52 +392,50 @@ class BROSModelPLModule(pl.LightningModule):
             n_batch_pred_classes += n_pred_classes
             n_batch_correct_classes += n_correct_classes
 
+            box_first_token_idx2ori_idx = box_first_token_mask.nonzero(as_tuple=True)[0]
+            box2token_span_maps = torch.hstack((
+                (box_first_token_mask == True).nonzero(),
+                (box_end_token_mask == True).nonzero()
+            )).cpu().numpy()
+            start_token_idx2end_token_idx = {e[0]:e[1] for e in box2token_span_maps}
 
+            pred_cls2text = {name: [] for name in self.class_names}
+            gt_cls2text = deepcopy(pred_cls2text)
+            correct_cls2text = deepcopy(pred_cls2text)
+            incorrect_cls2text = deepcopy(pred_cls2text)
+            for cls_idx, cls_name in enumerate(self.class_names):
+                # all pred text for cls
+                for box_first_token_indices in pred_parse[cls_idx]:
+                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    pred_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    pred_cls2text[cls_name].append(pred_text)
 
-        #     box_first_token_idx2ori_idx = box_first_token_mask.nonzero(as_tuple=True)[0]
-        #     box2token_span_maps = torch.hstack((
-        #         (box_first_token_mask == True).nonzero(),
-        #         (box_end_token_mask == True).nonzero()
-        #     )).cpu().numpy()
-        #     start_token_idx2end_token_idx = {e[0]:e[1] for e in box2token_span_maps}
+                # all gt text for cls
+                for box_first_token_indices in gt_parse[cls_idx]:
+                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    gt_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    gt_cls2text[cls_name].append(gt_text)
 
-        #     pred_cls2text = {name: [] for name in self.class_names}
-        #     gt_cls2text = deepcopy(pred_cls2text)
-        #     correct_cls2text = deepcopy(pred_cls2text)
-        #     incorrect_cls2text = deepcopy(pred_cls2text)
-        #     for cls_idx, cls_name in enumerate(self.class_names):
-        #         # all pred text for cls
-        #         for box_first_token_indices in pred_parse[cls_idx]:
-        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-        #             pred_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-        #             pred_cls2text[cls_name].append(pred_text)
+                # all correct text for cls
+                for box_first_token_indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
+                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    correct_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    correct_cls2text[cls_name].append(correct_text)
 
-        #         # all gt text for cls
-        #         for box_first_token_indices in gt_parse[cls_idx]:
-        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-        #             gt_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-        #             gt_cls2text[cls_name].append(gt_text)
+                # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
+                for box_first_token_indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
+                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    incorrect_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    incorrect_cls2text[cls_name].append(incorrect_text)
 
-        #         # all correct text for cls
-        #         for box_first_token_indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
-        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-        #             correct_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-        #             correct_cls2text[cls_name].append(correct_text)
-
-        #         # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
-        #         for box_first_token_indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
-        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-        #             incorrect_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-        #             incorrect_cls2text[cls_name].append(incorrect_text)
-
-        # print(f"{pred_cls2text = }")
-        # print(f"{gt_cls2text = }")
-        # print(f"{correct_cls2text = }")
-        # print(f"{incorrect_cls2text = }")
+        print(f"{pred_cls2text = }")
+        print(f"{gt_cls2text = }")
+        print(f"{correct_cls2text = }")
+        print(f"{incorrect_cls2text = }")
 
         step_out = {
             "n_batch_gt_classes": n_batch_gt_classes,
