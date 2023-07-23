@@ -104,9 +104,15 @@ class SROIEBIODataset(Dataset):
 
         # each word is splited into tokens, and since only have bbox for each word, tokens from same word get same bbox
         # but we want to calculate loss for only "first token of the box", so we make box_first_token masks
-        end_indices = np.array(list(itertools.accumulate(tokens_length_list)))
-        st_indices = end_indices - np.array(tokens_length_list) + 1 # add 1 for CLS token
-        end_indices_mask = np.zeros(self.max_seq_length) + 1 # add 1 for CLS token
+        # add 1 in the end, considering [CLS] token that will be added to the beginning
+        end_indices = np.array(list(itertools.accumulate(tokens_length_list))) + 1
+        st_indices = end_indices - np.array(tokens_length_list)
+
+        end_indices = end_indices[end_indices < self.max_seq_length -1]
+        if len(st_indices) > len(end_indices):
+            st_indices = st_indices[: len(end_indices)]
+
+        # end_indices_mask = np.zeros(self.max_seq_length) + 1
         are_box_first_tokens[st_indices] = True
         are_box_end_tokens[end_indices] = True
 
@@ -208,24 +214,6 @@ class SROIEBIODataset(Dataset):
         attention_mask = torch.from_numpy(attention_mask)
         are_box_first_tokens = torch.from_numpy(are_box_first_tokens)
         are_box_end_tokens = torch.from_numpy(are_box_end_tokens)
-
-
-        # print()
-        # print(padded_input_ids.shape)
-        # print(padded_bboxes.shape)
-        # print(padded_labels.shape)
-        # print(attention_mask.shape)
-        # print(are_box_first_tokens.shape)
-        # print(are_box_end_tokens.shape)
-
-        # if padded_input_ids.shape[0] != self.max_seq_length:
-        #     breakpoint()
-
-        # if padded_bboxes_ids.shape[0] != self.max_seq_length:
-        #     breakpoint()
-
-        # if padded_labels.shape[0] != self.max_seq_length:
-        #     breakpoint()
 
         return_dict = {
             "input_ids": padded_input_ids,
