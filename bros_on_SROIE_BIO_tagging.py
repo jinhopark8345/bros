@@ -69,7 +69,7 @@ class SROIEBIODataset(Dataset):
 
         self.examples = load_dataset(self.dataset)[split]
 
-        self.class_names = ['ADDRESS', 'COMPANY', 'DATE', 'TOTAL']
+        self.class_names = ['address', 'company', 'date', 'total']
         self.bio_class_names = ["O"]
         for class_name in self.class_names:
             self.bio_class_names.extend([f"B_{class_name}", f"I_{class_name}"])
@@ -830,7 +830,7 @@ if __name__ == "__main__":
             "strategy": {"type": "ddp"},
             "clip_gradient_algorithm": "norm",
             "clip_gradient_value": 1.0,
-            "num_workers": 0,
+            "num_workers": 8,
             "optimizer": {
                 "method": "adamw",
                 "params": {"lr": 5e-05},
