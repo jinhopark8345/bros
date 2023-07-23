@@ -53,28 +53,27 @@ class SROIEBIODataset(Dataset):
         dataset,
         tokenizer,
         max_seq_length=512,
-        mode=None,
+        split='train',
+        bio_format=True
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
-        self.mode = mode
+        self.split = split
+        self.bio_format = bio_format
 
         self.pad_token_id = self.tokenizer.pad_token_id
         self.cls_token_id = self.tokenizer.cls_token_id
         self.sep_token_id = self.tokenizer.sep_token_id
         self.unk_token_id = self.tokenizer.unk_token_id
 
-        self.examples = load_dataset(self.dataset)[mode]
-        self.class_names = list(self.examples["parse"][0]["class"].keys())
-        self.class_idx_dic = dict(
-            [(class_name, idx) for idx, class_name in enumerate(self.class_names)]
-        )
+        self.examples = load_dataset(self.dataset)[split]
 
+        self.class_names = ['ADDRESS', 'COMPANY', 'DATE', 'TOTAL']
         self.bio_class_names = ["O"]
         for class_name in self.class_names:
             self.bio_class_names.extend([f"B_{class_name}", f"I_{class_name}"])
-        self.bio_class_idx_dic = dict(
+        self.bio_class_name2idx = dict(
             [
                 (bio_class_name, idx)
                 for idx, bio_class_name in enumerate(self.bio_class_names)
@@ -85,136 +84,158 @@ class SROIEBIODataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        json_obj = self.examples[idx]
+        sample = self.examples[idx]
 
-        width = json_obj["meta"]["imageSize"]["width"]
-        height = json_obj["meta"]["imageSize"]["height"]
+        width, height = sample['img'].size
+        words: List[str] = sample['words']
+        bboxes: List[List[int]] = sample['bboxes']
+        labels: List[str] = sample['labels']
 
-        input_ids = np.ones(self.max_seq_length, dtype=int) * self.pad_token_id
-        bbox = np.zeros((self.max_seq_length, 8), dtype=np.float32)
-        attention_mask = np.zeros(self.max_seq_length, dtype=int)
+        sep_bbs = [width, height] * 2
+        cls_bbs = [0] * 4
 
-        bio_labels = np.zeros(self.max_seq_length, dtype=int)
         are_box_first_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
         are_box_end_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
 
-        list_tokens = []
-        list_bbs = []
-        box2token_span_map = []
 
-        cls_bbs = [0.0] * 8
+        # encode(tokenize) each word from words (List[str])
+        input_ids_list: List[List[int]] = [self.tokenizer.encode(e, add_special_tokens=False) for e in words]
+        tokens_length_list: List[int] = [len(l) for l in input_ids_list]
 
-        for word_idx, word in enumerate(json_obj["words"]):
-            tokens = word["tokens"]
-            bb = word["boundingBox"]
-            if len(tokens) == 0:
-                tokens.append(self.unk_token_id)
+        # each word is splited into tokens, and since only have bbox for each word, tokens from same word get same bbox
+        # but we want to calculate loss for only "first token of the box", so we make box_first_token masks
+        end_indices = np.array(list(itertools.accumulate(tokens_length_list)))
+        st_indices = end_indices - np.array(tokens_length_list) + 1 # add 1 for CLS token
+        end_indices_mask = np.zeros(self.max_seq_length) + 1 # add 1 for CLS token
+        are_box_first_tokens[st_indices] = True
+        are_box_end_tokens[end_indices] = True
 
-            if len(list_tokens) + len(tokens) > self.max_seq_length - 2:
-                break
+        # duplicate each word's bbox to length of tokens (of each word)
+        # e.g. AAA -> (tokenize) -> A, A, A then copy bbox of AAA 3 times
+        bboxes_list: List[List[List[int]]] = [[bboxes[idx] for _ in range(len(l))] for idx, l in enumerate(input_ids_list)]
 
-            box2token_span_map.append(
-                [len(list_tokens) + 1, len(list_tokens) + len(tokens) + 1]
-            )  # including st_idx
-            list_tokens += tokens
+        # do duplicate each word's label to length of tokens (of each word)
+        labels_list: List[List[str]] = [[labels[idx] for _ in range(len(l))] for idx, l in enumerate(input_ids_list)]
 
-            # min, max clipping
-            for coord_idx in range(4):
-                bb[coord_idx][0] = max(0.0, min(bb[coord_idx][0], width))
-                bb[coord_idx][1] = max(0.0, min(bb[coord_idx][1], height))
+        # flatten input_ids, bboxes, labels
+        input_ids: List[int] =list(itertools.chain.from_iterable(input_ids_list))
+        bboxes: List[List[int]] = list(itertools.chain.from_iterable(bboxes_list))
+        labels: List[str] = list(itertools.chain.from_iterable(labels_list))
 
-            bb = list(itertools.chain(*bb))
-            bbs = [bb for _ in range(len(tokens))]
-            list_bbs.extend(bbs)
+        # sanity check
+        assert len(input_ids) == len(bboxes) and len(input_ids) == len(labels)
 
-        sep_bbs = [width, height] * 4
+        ##################################################################
+        ### convert labels -> bio(begin, inner, outside) labels
+        class_span_map = []
+        for k, g in itertools.groupby(enumerate(labels), lambda e: e[1]):
+            if k == 'O':
+                continue
+            g = list(g)
+            class_span_map.append((k, g[0][0], g[-1][0]))
 
+        bio_labels = deepcopy(labels) # because we are going to update class_names except "O" class
+        for span in class_span_map:
+            class_name, st_idx, end_idx = span
+            bio_labels[st_idx] = "B_" + class_name
+            for idx in range(st_idx+1, end_idx+1):
+                bio_labels[idx] = "I_" + class_name
+        ##################################################################
+
+
+        ##############################################################
         # For [CLS] and [SEP]
-        list_tokens = (
-            [self.cls_token_id]
-            + list_tokens[: self.max_seq_length - 2]
-            + [self.sep_token_id]
-        )
-        if len(list_bbs) == 0:
-            # When len(json_obj["words"]) == 0 (no OCR result)
-            list_bbs = [cls_bbs] + [sep_bbs]
+
+        ### update input_ids with correspoding cls_token_id in the begining and sep_token_id in the end
+        input_ids = [self.cls_token_id] + input_ids[: self.max_seq_length - 2] + [self.sep_token_id]
+
+        # # are_box_first_tokens = [False] + are_box_first_tokens[: self.max_seq_length - 2] + [False]
+        # are_box_first_tokens = np.insert(are_box_first_tokens, 0, 0)
+        # are_box_first_tokens[-1] = 0
+
+        # # are_box_end_tokens = [False] + are_box_end_tokens[: self.max_seq_length - 2] + [False]
+        # are_box_end_tokens = np.insert(are_box_end_tokens, 0, 0) # obj -> index
+        # are_box_end_tokens[-1] = 0
+
+        ### update labels
+        bio_labels = ['O'] + bio_labels[: self.max_seq_length - 2] + ['O']
+        bio_labels = [self.bio_class_name2idx[l] for l in bio_labels]
+
+        ### update bboxes with correspoding cls_token bbox in the begining and sep_token bbox in the end
+        if len(bboxes) == 0: # When len(json_obj["words"]) == 0 (no OCR result)
+            bboxes = [cls_bbs] + [sep_bbs]
         else:  # len(list_bbs) > 0
-            list_bbs = [cls_bbs] + list_bbs[: self.max_seq_length - 2] + [sep_bbs]
+            bboxes = [cls_bbs] + bboxes[: self.max_seq_length - 2] + [sep_bbs]
+        ##############################################################
 
-        len_list_tokens = len(list_tokens)
-        input_ids[:len_list_tokens] = list_tokens
-        attention_mask[:len_list_tokens] = 1
 
-        bbox[:len_list_tokens, :] = list_bbs
+        ##############################################################
+        # prepare padded input_ids, bboxes (padded to self.max_seq_length)
+        len_ori_input_ids = len(input_ids)
+
+        padded_input_ids = np.ones(self.max_seq_length, dtype=int) * self.pad_token_id
+        padded_input_ids[:len_ori_input_ids] = input_ids
+
+        padded_labels = np.zeros(self.max_seq_length, dtype=int)
+        padded_labels[:len_ori_input_ids] = np.array(bio_labels)
+
+        attention_mask = np.zeros(self.max_seq_length, dtype=int)
+        attention_mask[:len_ori_input_ids] = 1
+
+
+        # prepare padded_bboxes
+        padded_bboxes = np.zeros((self.max_seq_length, 4), dtype=np.float32)
+
+        # convert list to numpy array
+        bboxes = np.array(bboxes)
+
+        # save original bboxes in padded_bboxes
+        padded_bboxes[:len_ori_input_ids, :] = bboxes
+        ##############################################################
+
+
+        # expand bbox from [x1, y1, x2, y2] (2points) -> [x1, y1, x2, y1, x2, y2, x1, y2] (4points)
+        padded_bboxes = padded_bboxes[:, [0, 1, 2, 1, 2, 3, 0, 3]]
 
         # Normalize bbox -> 0 ~ 1
-        bbox[:, [0, 2, 4, 6]] = bbox[:, [0, 2, 4, 6]] / width
-        bbox[:, [1, 3, 5, 7]] = bbox[:, [1, 3, 5, 7]] / height
+        padded_bboxes[:, [0, 2, 4, 6]] = padded_bboxes[:, [0, 2, 4, 6]] / width
+        padded_bboxes[:, [1, 3, 5, 7]] = padded_bboxes[:, [1, 3, 5, 7]] / height
 
-        # Label
-        classes_dic = json_obj["parse"]["class"]
-        for class_name in self.class_names:
-            if class_name == "O":
-                continue
-            if class_name not in classes_dic:
-                continue
-            if classes_dic[class_name] is None:
-                continue
 
-            for word_list in classes_dic[class_name]:
-                # At first, connect the class and the first box
-                is_first, last_word_idx = True, -1
-                for word_idx in word_list:
-                    if word_idx >= len(box2token_span_map):
-                        break
-                    box2token_span_start, box2token_span_end = box2token_span_map[
-                        word_idx
-                    ]
-                    for converted_word_idx in range(
-                        box2token_span_start, box2token_span_end
-                    ):
-                        if converted_word_idx >= self.max_seq_length:
-                            break
-
-                        if is_first:
-                            bio_labels[converted_word_idx] = self.bio_class_idx_dic[
-                                f"B_{class_name}"
-                            ]
-                            is_first = False
-                        else:
-                            bio_labels[converted_word_idx] = self.bio_class_idx_dic[
-                                f"I_{class_name}"
-                            ]
-
-            st_indices, end_indices = zip(*box2token_span_map)
-            st_indices = [
-                st_idx for st_idx in st_indices if st_idx < self.max_seq_length
-            ]
-            end_indices = [
-                end_idx for end_idx in end_indices if end_idx < self.max_seq_length
-            ]
-
-            assert len(st_indices) == len(end_indices)
-
-            are_box_first_tokens[st_indices] = True
-            are_box_end_tokens[end_indices] = True
-
-        input_ids = torch.from_numpy(input_ids)
-        bbox = torch.from_numpy(bbox)
+        padded_input_ids = torch.from_numpy(padded_input_ids)
+        padded_bboxes = torch.from_numpy(padded_bboxes)
+        padded_labels = torch.from_numpy(padded_labels)
         attention_mask = torch.from_numpy(attention_mask)
-
-        bio_labels = torch.from_numpy(bio_labels)
         are_box_first_tokens = torch.from_numpy(are_box_first_tokens)
         are_box_end_tokens = torch.from_numpy(are_box_end_tokens)
 
+
+        # print()
+        # print(padded_input_ids.shape)
+        # print(padded_bboxes.shape)
+        # print(padded_labels.shape)
+        # print(attention_mask.shape)
+        # print(are_box_first_tokens.shape)
+        # print(are_box_end_tokens.shape)
+
+        # if padded_input_ids.shape[0] != self.max_seq_length:
+        #     breakpoint()
+
+        # if padded_bboxes_ids.shape[0] != self.max_seq_length:
+        #     breakpoint()
+
+        # if padded_labels.shape[0] != self.max_seq_length:
+        #     breakpoint()
+
         return_dict = {
-            "input_ids": input_ids,
-            "bbox": bbox,
+            "input_ids": padded_input_ids,
+            "bbox": padded_bboxes,
             "attention_mask": attention_mask,
-            "bio_labels": bio_labels,
+            "bio_labels": padded_labels,
             "are_box_first_tokens": are_box_first_tokens,
             "are_box_end_tokens": are_box_end_tokens,
         }
+
 
         return return_dict
 
@@ -338,7 +359,7 @@ class BROSModelPLModule(pl.LightningModule):
             labels=labels,
         )
 
-        val_loss = predictin.loss
+        val_loss = prediction.loss
         pred_labels = torch.argmax(prediction.logits, -1)
 
         n_batch_gt_classes, n_batch_pred_classes, n_batch_correct_classes = 0, 0, 0
@@ -385,50 +406,50 @@ class BROSModelPLModule(pl.LightningModule):
 
 
 
-            box_first_token_idx2ori_idx = box_first_token_mask.nonzero(as_tuple=True)[0]
-            box2token_span_maps = torch.hstack((
-                (box_first_token_mask == True).nonzero(),
-                (box_end_token_mask == True).nonzero()
-            )).cpu().numpy()
-            start_token_idx2end_token_idx = {e[0]:e[1] for e in box2token_span_maps}
+        #     box_first_token_idx2ori_idx = box_first_token_mask.nonzero(as_tuple=True)[0]
+        #     box2token_span_maps = torch.hstack((
+        #         (box_first_token_mask == True).nonzero(),
+        #         (box_end_token_mask == True).nonzero()
+        #     )).cpu().numpy()
+        #     start_token_idx2end_token_idx = {e[0]:e[1] for e in box2token_span_maps}
 
-            pred_cls2text = {name: [] for name in self.class_names}
-            gt_cls2text = deepcopy(pred_cls2text)
-            correct_cls2text = deepcopy(pred_cls2text)
-            incorrect_cls2text = deepcopy(pred_cls2text)
-            for cls_idx, cls_name in enumerate(self.class_names):
-                # all pred text for cls
-                for box_first_token_indices in pred_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    pred_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-                    pred_cls2text[cls_name].append(pred_text)
+        #     pred_cls2text = {name: [] for name in self.class_names}
+        #     gt_cls2text = deepcopy(pred_cls2text)
+        #     correct_cls2text = deepcopy(pred_cls2text)
+        #     incorrect_cls2text = deepcopy(pred_cls2text)
+        #     for cls_idx, cls_name in enumerate(self.class_names):
+        #         # all pred text for cls
+        #         for box_first_token_indices in pred_parse[cls_idx]:
+        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+        #             pred_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+        #             pred_cls2text[cls_name].append(pred_text)
 
-                # all gt text for cls
-                for box_first_token_indices in gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    gt_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-                    gt_cls2text[cls_name].append(gt_text)
+        #         # all gt text for cls
+        #         for box_first_token_indices in gt_parse[cls_idx]:
+        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+        #             gt_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+        #             gt_cls2text[cls_name].append(gt_text)
 
-                # all correct text for cls
-                for box_first_token_indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    correct_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-                    correct_cls2text[cls_name].append(correct_text)
+        #         # all correct text for cls
+        #         for box_first_token_indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
+        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+        #             correct_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+        #             correct_cls2text[cls_name].append(correct_text)
 
-                # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
-                for box_first_token_indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    incorrect_text = self.tokenizer.decode(input_ids[example_idx][text_span])
-                    incorrect_cls2text[cls_name].append(incorrect_text)
+        #         # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
+        #         for box_first_token_indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
+        #             ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
+        #             text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+        #             incorrect_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+        #             incorrect_cls2text[cls_name].append(incorrect_text)
 
-        print(f"{pred_cls2text = }")
-        print(f"{gt_cls2text = }")
-        print(f"{correct_cls2text = }")
-        print(f"{incorrect_cls2text = }")
+        # print(f"{pred_cls2text = }")
+        # print(f"{gt_cls2text = }")
+        # print(f"{correct_cls2text = }")
+        # print(f"{incorrect_cls2text = }")
 
         step_out = {
             "n_batch_gt_classes": n_batch_gt_classes,
@@ -569,13 +590,14 @@ def train(cfg):
         dataset=cfg.dataset,
         tokenizer=tokenizer,
         max_seq_length=cfg.model.max_seq_length,
-        mode="train",
+        split="train",
     )
+
     val_dataset = SROIEBIODataset(
         dataset=cfg.dataset,
         tokenizer=tokenizer,
         max_seq_length=cfg.model.max_seq_length,
-        mode="val",
+        split="val",
     )
 
     # make data module & update data_module train and val dataset
@@ -664,7 +686,7 @@ def inference(cfg):
         dataset=cfg.dataset,
         tokenizer=tokenizer,
         max_seq_length=cfg.model.max_seq_length,
-        mode="val",
+        split="val",
     )
     class_names = dataset.class_names
 
@@ -802,7 +824,7 @@ if __name__ == "__main__":
         "workspace": "./finetune_sroie_ee_bio",
         "exp_name": "bros-base-uncased_from_dict_config3",
         "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
-        "dataset": "jinho8345/bros-sroie",
+        "dataset": "jinho8345/sroie",
         "task": "ee",
         "seed": 1,
         "cudnn_deterministic": False,
@@ -833,5 +855,5 @@ if __name__ == "__main__":
 
     # convert dictionary to omegaconf and update config
     cfg = OmegaConf.create(finetune_sroie_ee_bio_config)
-    # train(cfg)
-    inference(cfg)
+    train(cfg)
+    # inference(cfg)

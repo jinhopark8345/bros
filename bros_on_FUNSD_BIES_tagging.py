@@ -1,53 +1,53 @@
+import datetime
 import itertools
 import json
-import os
-import numpy as np
-import time
-from overrides import overrides
-from omegaconf import OmegaConf
-from itertools import chain
-
-import torch
-import torch.nn as nn
-from torch.optim import SGD, Adam, AdamW
-from torch.utils.data.dataset import Dataset
-from torch.utils.data.dataloader import DataLoader
-import pytorch_lightning as pl
-
-from datasets import load_dataset
-from datasets import load_from_disk
-from pytorch_lightning import Trainer
-from transformers import AutoTokenizer
-
-from utils import get_class_names
-
 import math
+import os
 import random
 import re
+import time
+from copy import deepcopy
 from pathlib import Path
+from pprint import pprint
 
-from pytorch_lightning.utilities import rank_zero_only
-from pytorch_lightning.utilities.seed import seed_everything
-from torch.optim.lr_scheduler import LambdaLR
-
-from utils import get_callbacks, get_config, get_loggers, get_plugins
-from bros.modeling_bros import BrosForTokenClassification
-from bros import BrosTokenizer
-from bros import BrosConfig
-
+import numpy as np
+import pytorch_lightning as pl
+import torch
+import torch.nn as nn
+import yaml
+from omegaconf import OmegaConf
+from omegaconf.dictconfig import DictConfig
+from overrides import overrides
+from pytorch_lightning.callbacks import (
+    LearningRateMonitor,
+    ModelCheckpoint,
+    ModelSummary,
+    TQDMProgressBar,
+    EarlyStopping,
+)
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-from pytorch_lightning.utilities.distributed import rank_zero_only
-from torch.optim.lr_scheduler import LambdaLR
 
+from pytorch_lightning.plugins import CheckpointIO
+from pytorch_lightning.utilities import rank_zero_only
+
+from torch.optim import SGD, Adam, AdamW
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data.dataloader import DataLoader
+from torch.utils.data.dataset import Dataset
+from tqdm import tqdm
+from transformers import AutoTokenizer
+import itertools
+
+from bros import BrosConfig, BrosTokenizer
+from bros.modeling_bros import BrosForTokenClassification
+from datasets import load_dataset, load_from_disk
 from lightning_modules.schedulers import (
     cosine_scheduler,
     linear_scheduler,
     multistep_scheduler,
 )
-from utils import cfg_to_hparams, get_specific_pl_logger
-from seqeval.metrics import f1_score, precision_score, recall_score
 
-class FUNSDBIODataset(Dataset):
+class FUNSDBIESDataset(Dataset):
     def __init__(
         self,
         dataset,
@@ -66,9 +66,10 @@ class FUNSDBIODataset(Dataset):
         self.unk_token_id = self.tokenizer.unk_token_id
 
         self.examples = load_dataset(self.dataset)[mode]
-        self.bies_class_names = list(set(chain.from_iterable([set(example['labels']) for example in self.examples])))
+        self.bies_class_names = list(set(itertools.chain.from_iterable([set(example['labels']) for example in self.examples])))
         self.bies_class2idx = {label: idx for idx, label in enumerate(self.bies_class_names)}
         self.idx2bies_class = {idx: label for label, idx in self.bies_class2idx.items()}
+        breakpoint()
         self.features = convert_examples_to_features(
             examples=self.examples,
             class2idx=self.bies_class2idx,
@@ -326,63 +327,52 @@ class BROSModelPLModule(pl.LightningModule):
             "label_map": -1,
         }
 
-    def model_forward(self, batch):
-        input_ids = batch["input_ids"]
-        bbox = batch["bbox"]
-        attention_mask = batch["attention_mask"]
-
-        head_outputs = self.model(
-            input_ids=input_ids, bbox=bbox, attention_mask=attention_mask
-        )
-
-        loss = self._get_loss(head_outputs.logits, batch)
-
-        return head_outputs, loss
-
-    def _get_loss(self, head_outputs, batch):
-        # logits = head_outputs.view(-1, self.model_cfg.n_classes)
-        logits = head_outputs.view(-1, self.cfg.model.n_classes)
-        labels = batch["labels"].view(-1)
-
-        loss = self.loss_func(logits, labels)
-
-        return loss
-
-    @overrides
     def training_step(self, batch, batch_idx, *args):
         _, loss = self.model_forward(batch)
         log_dict_input = {"train_loss": loss}
         self.log_dict(log_dict_input, sync_dist=True)
         return loss
 
-    @torch.no_grad()
-    @overrides
     def validation_step(self, batch, batch_idx, *args):
         head_outputs, loss = self.model_forward(batch)
         step_out = do_eval_step(batch, head_outputs.logits, loss, self.eval_kwargs)
         return step_out
 
-    @torch.no_grad()
-    @overrides
-    def validation_epoch_end(self, validation_step_outputs):
-        scores = do_eval_epoch_end(validation_step_outputs)
-        self.print(
-            f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
-        )
+    def on_validation_epoch_end(self):
+        ...
+        # scores = do_eval_epoch_end(validation_step_outputs)
+        # self.print(
+        #     f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
+        # )
 
-    @torch.no_grad()
-    @overrides
-    def validation_epoch_end(self, validation_step_outputs):
-        scores = do_eval_epoch_end(validation_step_outputs)
-        self.print(
-            f"precision: {scores['precision']:.4f}, recall: {scores['recall']:.4f}, f1: {scores['f1']:.4f}"
-        )
 
-    @overrides
+    def model_forward(self, batch):
+        # input_ids = batch["input_ids"]
+        # bbox = batch["bbox"]
+        # attention_mask = batch["attention_mask"]
+
+        # head_outputs = self.model(
+        #     input_ids=input_ids, bbox=bbox, attention_mask=attention_mask
+        # )
+
+        # loss = self._get_loss(head_outputs.logits, batch)
+
+        # return head_outputs, loss
+        ...
+
+    def _get_loss(self, head_outputs, batch):
+        # # logits = head_outputs.view(-1, self.model_cfg.n_classes)
+        # logits = head_outputs.view(-1, self.cfg.model.n_classes)
+        # labels = batch["labels"].view(-1)
+
+        # loss = self.loss_func(logits, labels)
+
+        # return loss
+        ...
+
     def setup(self, stage):
         self.time_tracker = time.time()
 
-    @overrides
     def configure_optimizers(self):
         optimizer = self._get_optimizer()
         scheduler = self._get_lr_scheduler(optimizer)
@@ -434,176 +424,134 @@ class BROSModelPLModule(pl.LightningModule):
 
         return optimizer
 
-    @rank_zero_only
-    @overrides
-    def on_fit_end(self):
-        hparam_dict = cfg_to_hparams(self.cfg, {})
-        metric_dict = {"metric/dummy": 0}
+    # @rank_zero_only
+    # @overrides
+    # def on_fit_end(self):
+    #     hparam_dict = cfg_to_hparams(self.cfg, {})
+    #     metric_dict = {"metric/dummy": 0}
 
-        tb_logger = get_specific_pl_logger(self.logger, TensorBoardLogger)
+    #     tb_logger = get_specific_pl_logger(self.logger, TensorBoardLogger)
 
-        if tb_logger:
-            tb_logger.log_hyperparams(hparam_dict, metric_dict)
+    #     if tb_logger:
+    #         tb_logger.log_hyperparams(hparam_dict, metric_dict)
 
-    @overrides
-    def training_epoch_end(self, training_step_outputs):
-        avg_loss = torch.tensor(0.0).to(self.device)
-        for step_out in training_step_outputs:
-            avg_loss += step_out["loss"]
+    # @overrides
+    # def training_epoch_end(self, training_step_outputs):
+    #     avg_loss = torch.tensor(0.0).to(self.device)
+    #     for step_out in training_step_outputs:
+    #         avg_loss += step_out["loss"]
 
-        log_dict = {"train_loss": avg_loss}
-        self._log_shell(log_dict, prefix="train ")
+    #     log_dict = {"train_loss": avg_loss}
+    #     self._log_shell(log_dict, prefix="train ")
 
-    def _log_shell(self, log_info, prefix=""):
-        log_info_shell = {}
-        for k, v in log_info.items():
-            new_v = v
-            if type(new_v) is torch.Tensor:
-                new_v = new_v.item()
-            log_info_shell[k] = new_v
+    # def _log_shell(self, log_info, prefix=""):
+    #     log_info_shell = {}
+    #     for k, v in log_info.items():
+    #         new_v = v
+    #         if type(new_v) is torch.Tensor:
+    #             new_v = new_v.item()
+    #         log_info_shell[k] = new_v
 
-        out_str = prefix.upper()
-        if prefix.upper().strip() in ["TRAIN", "VAL"]:
-            out_str += f"[epoch: {self.current_epoch}/{self.cfg.train.max_epochs}]"
+    #     out_str = prefix.upper()
+    #     if prefix.upper().strip() in ["TRAIN", "VAL"]:
+    #         out_str += f"[epoch: {self.current_epoch}/{self.cfg.train.max_epochs}]"
 
-        if self.training:
-            lr = self.trainer._lightning_optimizers[0].param_groups[0]["lr"]
-            log_info_shell["lr"] = lr
+    #     if self.training:
+    #         lr = self.trainer._lightning_optimizers[0].param_groups[0]["lr"]
+    #         log_info_shell["lr"] = lr
 
-        for key, value in log_info_shell.items():
-            out_str += f" || {key}: {round(value, 5)}"
-        out_str += f" || time: {round(time.time() - self.time_tracker, 1)}"
-        out_str += " secs."
-        self.print(out_str, flush=True)
-        self.time_tracker = time.time()
+    #     for key, value in log_info_shell.items():
+    #         out_str += f" || {key}: {round(value, 5)}"
+    #     out_str += f" || time: {round(time.time() - self.time_tracker, 1)}"
+    #     out_str += " secs."
+    #     self.print(out_str, flush=True)
+    #     self.time_tracker = time.time()
 
-def do_eval_step(batch, head_outputs, loss, eval_kwargs):
-    ignore_index = eval_kwargs["ignore_index"]
-    label_map = eval_kwargs["label_map"]
 
-    pr_labels = torch.argmax(head_outputs, -1).cpu().numpy()
 
-    labels = batch["labels"]
-    gt_labels = labels.cpu().numpy()
 
-    prs, gts = [], []
-    # https://github.com/microsoft/unilm/blob/master/layoutlm/deprecated/examples/seq_labeling/run_seq_labeling.py#L372
-    bsz, max_seq_length = labels.shape
-    for example_idx in range(bsz):
-        example_prs, example_gts = [], []
-        for token_idx in range(max_seq_length):
-            if labels[example_idx, token_idx] != ignore_index:
-                example_prs.append(label_map[pr_labels[example_idx, token_idx]])
-                example_gts.append(label_map[gt_labels[example_idx, token_idx]])
-        prs.append(example_prs)
-        gts.append(example_gts)
+def train(cfg):
+    cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
+    cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
+    cfg.exp_version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    step_out = {
-        "loss": loss,
-        "prs": prs,
-        "gts": gts,
+    # pprint cfg
+    print(OmegaConf.to_yaml(cfg))
+
+    # set env
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
+    pl.seed_everything(cfg.seed)
+
+    # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
+    tokenizer = BrosTokenizer.from_pretrained(cfg.tokenizer_path)
+
+    # Prepare FUNSD dataset
+    train_dataset = FUNSDBIESDataset(
+        dataset=cfg.dataset,
+        tokenizer=tokenizer,
+        max_seq_length=cfg.model.max_seq_length,
+        mode='train'
+    )
+
+    val_dataset = FUNSDBIESDataset(
+        dataset=cfg.dataset,
+        tokenizer=tokenizer,
+        max_seq_length=cfg.model.max_seq_length,
+        mode='val'
+    )
+
+    # make data module & update data_module train and val dataset
+    data_module = BROSDataPLModule(cfg)
+    data_module.train_dataset = train_dataset
+    data_module.val_dataset = val_dataset
+
+    breakpoint()
+    # Load BROS config & pretrained model
+    ## update config
+    bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
+    bies_class_names = train_dataset.bies_class_names
+    id2label = {idx: name for idx, name in enumerate(bies_class_names)}
+    label2id = {name: idx for idx, name in id2label.items()}
+    bros_config.id2label = id2label
+    bros_config.label2id = label2id
+
+
+if __name__ == "__main__":
+    # load training config
+    finetune_funsd_ee_bies_config = {
+        "workspace": "./finetune_funsd_ee_bies",
+        "exp_name": "bros-base-uncased_from_dict_config3",
+        "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
+        "dataset": "jinho8345/bros-funsd-bies",
+        "task": "ee",
+        "seed": 1,
+        "cudnn_deterministic": False,
+        "cudnn_benchmark": True,
+        "model": {
+            "pretrained_model_name_or_path": "naver-clova-ocr/bros-base-uncased",
+            "max_seq_length": 512,
+        },
+        "train": {
+            "batch_size": 16,
+            "num_samples_per_epoch": 526,
+            "max_epochs": 30,
+            "use_fp16": True,
+            "accelerator": "gpu",
+            "strategy": {"type": "ddp"},
+            "clip_gradient_algorithm": "norm",
+            "clip_gradient_value": 1.0,
+            "num_workers": 0,
+            "optimizer": {
+                "method": "adamw",
+                "params": {"lr": 5e-05},
+                "lr_schedule": {"method": "linear", "params": {"warmup_steps": 0}},
+            },
+            "val_interval": 1,
+        },
+        "val": {"batch_size": 16, "num_workers": 0, "limit_val_batches": 1.0},
     }
 
-    return step_out
-
-
-def do_eval_epoch_end(step_outputs):
-    prs, gts = [], []
-    for step_out in step_outputs:
-        prs.extend(step_out["prs"])
-        gts.extend(step_out["gts"])
-
-    precision = precision_score(gts, prs)
-    recall = recall_score(gts, prs)
-    f1 = f1_score(gts, prs)
-
-    scores = {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-    }
-
-    return scores
-
-
-
-# Load Config
-config_path = "configs/finetune_funsd_ee_bies_custom.yaml"
-cfg = OmegaConf.load(config_path)
-print(cfg)
-
-# Load Tokenizer
-tokenizer = BrosTokenizer.from_pretrained(cfg.tokenizer_path)
-
-train_dataset = FUNSDBIODataset(
-    dataset=cfg.dataset,
-    tokenizer=tokenizer,
-    max_seq_length=cfg.model.max_seq_length,
-    mode='train'
-)
-
-val_dataset = FUNSDBIODataset(
-    dataset=cfg.dataset,
-    tokenizer=tokenizer,
-    max_seq_length=cfg.model.max_seq_length,
-    mode='val'
-)
-
-# set env
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # prevent deadlock with tokenizer
-seed_everything(cfg.seed)
-
-# make data module
-data_module = BROSDataPLModule(cfg)
-# add datasets to data module
-data_module.train_dataset = train_dataset
-data_module.val_dataset = val_dataset
-
-# Load BROS model
-bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
-
-bros_config.num_labels = len(train_dataset.bies_class_names) # 4 classes * 2 (Beginning, Inside) + 1 (Outside)
-cfg.model.n_classes = bros_config.num_labels
-
-bros_model = BrosForTokenClassification.from_pretrained(
-    cfg.model.pretrained_model_name_or_path,
-    config=bros_config
-)
-breakpoint()
-model_module = BROSModelPLModule(cfg)
-model_module.model = bros_model
-model_module.eval_kwargs = {
-    "label_map": train_dataset.idx2bies_class,
-    "ignore_index": -100
-}
-
-cfg.save_weight_dir = os.path.join(cfg.workspace, "checkpoints")
-cfg.tensorboard_dir = os.path.join(cfg.workspace, "tensorboard_logs")
-
-
-callbacks = get_callbacks(cfg)
-plugins = get_plugins(cfg)
-loggers = get_loggers(cfg)
-
-trainer = Trainer(
-    accelerator=cfg.train.accelerator,
-    gpus=torch.cuda.device_count(),
-    max_epochs=cfg.train.max_epochs,
-    gradient_clip_val=cfg.train.clip_gradient_value,
-    gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
-    callbacks=callbacks,
-    plugins=plugins,
-    sync_batchnorm=True,
-    precision=16 if cfg.train.use_fp16 else 32,
-    terminate_on_nan=False,
-    replace_sampler_ddp=False,
-    move_metrics_to_cpu=False,
-    progress_bar_refresh_rate=0,
-    check_val_every_n_epoch=cfg.train.val_interval,
-    logger=loggers,
-    benchmark=cfg.cudnn_benchmark,
-    deterministic=cfg.cudnn_deterministic,
-    limit_val_batches=cfg.val.limit_val_batches,
-)
-
-trainer.fit(model_module, data_module)
+    # convert dictionary to omegaconf and update config
+    cfg = OmegaConf.create(finetune_funsd_ee_bies_config)
+    train(cfg)
+    # inference(cfg)
