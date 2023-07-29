@@ -47,7 +47,7 @@ from lightning_modules.schedulers import (
     multistep_scheduler,
 )
 
-class FUNSDBIESDataset(Dataset):
+class FUNSDBIOESDataset(Dataset):
     def __init__(
         self,
         dataset,
@@ -66,13 +66,13 @@ class FUNSDBIESDataset(Dataset):
         self.unk_token_id = self.tokenizer.unk_token_id
 
         self.examples = load_dataset(self.dataset)[mode]
-        self.bies_class_names = list(set(itertools.chain.from_iterable([set(example['labels']) for example in self.examples])))
-        self.bies_class2idx = {label: idx for idx, label in enumerate(self.bies_class_names)}
-        self.idx2bies_class = {idx: label for label, idx in self.bies_class2idx.items()}
-        breakpoint()
+        self.bioes_class_names = list(set(itertools.chain.from_iterable([set(example['labels']) for example in self.examples])))
+        self.bioes_class2idx = {label: idx for idx, label in enumerate(self.bioes_class_names)}
+        self.idx2bioes_class = {idx: label for label, idx in self.bioes_class2idx.items()}
+
         self.features = convert_examples_to_features(
             examples=self.examples,
-            class2idx=self.bies_class2idx,
+            class2idx=self.bioes_class2idx,
             max_seq_length=self.max_seq_length,
             tokenizer=self.tokenizer,
             cls_token_segment_id=0,
@@ -86,6 +86,7 @@ class FUNSDBIESDataset(Dataset):
     def __getitem__(self, idx):
         feature = self.features[idx]
         example = self.examples[idx]
+        breakpoint()
 
         width, height = feature.page_size
         bbox = np.zeros((self.max_seq_length, 8), dtype=np.float32)
@@ -485,15 +486,16 @@ def train(cfg):
     # Load Tokenizer (going to be used in dataset to to convert texts to input_ids)
     tokenizer = BrosTokenizer.from_pretrained(cfg.tokenizer_path)
 
+
     # Prepare FUNSD dataset
-    train_dataset = FUNSDBIESDataset(
+    train_dataset = FUNSDBIOESDataset(
         dataset=cfg.dataset,
         tokenizer=tokenizer,
         max_seq_length=cfg.model.max_seq_length,
         mode='train'
     )
 
-    val_dataset = FUNSDBIESDataset(
+    val_dataset = FUNSDBIOESDataset(
         dataset=cfg.dataset,
         tokenizer=tokenizer,
         max_seq_length=cfg.model.max_seq_length,
@@ -505,24 +507,26 @@ def train(cfg):
     data_module.train_dataset = train_dataset
     data_module.val_dataset = val_dataset
 
-    breakpoint()
+    # breakpoint()
     # Load BROS config & pretrained model
     ## update config
     bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
-    bies_class_names = train_dataset.bies_class_names
-    id2label = {idx: name for idx, name in enumerate(bies_class_names)}
+    bioes_class_names = train_dataset.bioes_class_names
+    id2label = {idx: name for idx, name in enumerate(bioes_class_names)}
     label2id = {name: idx for idx, name in id2label.items()}
     bros_config.id2label = id2label
     bros_config.label2id = label2id
 
+    tmp = train_dataset[0]
+
 
 if __name__ == "__main__":
     # load training config
-    finetune_funsd_ee_bies_config = {
-        "workspace": "./finetune_funsd_ee_bies",
+    finetune_funsd_ee_bioes_config = {
+        "workspace": "./finetune_funsd_ee_bioes",
         "exp_name": "bros-base-uncased_from_dict_config3",
         "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
-        "dataset": "jinho8345/bros-funsd-bies",
+        "dataset": "jinho8345/bros-funsd-bioes",
         "task": "ee",
         "seed": 1,
         "cudnn_deterministic": False,
@@ -552,6 +556,6 @@ if __name__ == "__main__":
     }
 
     # convert dictionary to omegaconf and update config
-    cfg = OmegaConf.create(finetune_funsd_ee_bies_config)
+    cfg = OmegaConf.create(finetune_funsd_ee_bioes_config)
     train(cfg)
     # inference(cfg)
