@@ -121,7 +121,17 @@ class SROIEBIODataset(Dataset):
         bboxes_list: List[List[List[int]]] = [[bboxes[idx] for _ in range(len(l))] for idx, l in enumerate(input_ids_list)]
 
         # do duplicate each word's label to length of tokens (of each word)
-        labels_list: List[List[str]] = [[labels[idx] for _ in range(len(l))] for idx, l in enumerate(input_ids_list)]
+        # if the word's label starts with 'B' tag, then convert input_ids' label to ['B', 'I', 'I', ...]
+        labels_list: List[List[str]] = []
+        for idx, l in enumerate(input_ids_list):
+            word_label = labels[idx]
+            if word_label.startswith('B_'):
+                class_name = word_label.split("_")[1]
+                input_ids_label = [word_label] + ["I_" + class_name for _ in range(len(l) - 1)]
+            else:
+                input_ids_label = [word_label for _ in range(len(l))]
+            labels_list.append(input_ids_label)
+
 
         # flatten input_ids, bboxes, labels
         input_ids: List[int] =list(itertools.chain.from_iterable(input_ids_list))
@@ -130,24 +140,6 @@ class SROIEBIODataset(Dataset):
 
         # sanity check
         assert len(input_ids) == len(bboxes) and len(input_ids) == len(labels)
-
-        ##################################################################
-        ### convert labels -> bio(begin, inner, outside) labels
-        class_span_map = []
-        for k, g in itertools.groupby(enumerate(labels), lambda e: e[1]):
-            if k == 'O':
-                continue
-            g = list(g)
-            class_span_map.append((k, g[0][0], g[-1][0]))
-
-        bio_labels = deepcopy(labels) # because we are going to update class_names except "O" class
-        for span in class_span_map:
-            class_name, st_idx, end_idx = span
-            bio_labels[st_idx] = "B_" + class_name
-            for idx in range(st_idx+1, end_idx+1):
-                bio_labels[idx] = "I_" + class_name
-        ##################################################################
-
 
         ##############################################################
         # For [CLS] and [SEP]
@@ -164,8 +156,8 @@ class SROIEBIODataset(Dataset):
         # are_box_end_tokens[-1] = 0
 
         ### update labels
-        bio_labels = ['O'] + bio_labels[: self.max_seq_length - 2] + ['O']
-        bio_labels = [self.bio_class_name2idx[l] for l in bio_labels]
+        labels = ['O'] + labels[: self.max_seq_length - 2] + ['O']
+        labels = [self.bio_class_name2idx[l] for l in labels]
 
         ### update bboxes with correspoding cls_token bbox in the begining and sep_token bbox in the end
         if len(bboxes) == 0: # When len(json_obj["words"]) == 0 (no OCR result)
@@ -183,7 +175,7 @@ class SROIEBIODataset(Dataset):
         padded_input_ids[:len_ori_input_ids] = input_ids
 
         padded_labels = np.zeros(self.max_seq_length, dtype=int)
-        padded_labels[:len_ori_input_ids] = np.array(bio_labels)
+        padded_labels[:len_ori_input_ids] = np.array(labels)
 
         attention_mask = np.zeros(self.max_seq_length, dtype=int)
         attention_mask[:len_ori_input_ids] = 1
@@ -810,7 +802,7 @@ if __name__ == "__main__":
         "workspace": "./finetune_sroie_ee_bio",
         "exp_name": "bros-base-uncased_from_dict_config3",
         "tokenizer_path": "naver-clova-ocr/bros-base-uncased",
-        "dataset": "jinho8345/sroie",
+        "dataset": "jinho8345/sroie-bio",
         "task": "ee",
         "seed": 1,
         "cudnn_deterministic": False,
