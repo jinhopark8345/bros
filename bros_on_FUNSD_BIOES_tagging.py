@@ -86,7 +86,6 @@ class FUNSDBIOESDataset(Dataset):
     def __getitem__(self, idx):
         feature = self.features[idx]
         example = self.examples[idx]
-        breakpoint()
 
         width, height = feature.page_size
         bbox = np.zeros((self.max_seq_length, 8), dtype=np.float32)
@@ -507,7 +506,6 @@ def train(cfg):
     data_module.train_dataset = train_dataset
     data_module.val_dataset = val_dataset
 
-    # breakpoint()
     # Load BROS config & pretrained model
     ## update config
     bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
