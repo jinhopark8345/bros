@@ -76,37 +76,36 @@ class FUNSDBIOESDataset(Dataset):
 
         self.class_names = ['header', 'question', 'answer']
         self.pad_token = self.tokenizer.pad_token
+        self.ignore_label_id = -100
 
         # self.out_class_name = "other"
-        # self.bioes_class_names = [self.out_class_name]
-        # for class_name in self.class_names:
-        #     self.bioes_class_names.extend(
-        #         [
-        #             f"B_{class_name}",
-        #             f"I_{class_name}",
-        #             f"E_{class_name}",
-        #             f"S_{class_name}",
-        #         ]
-        #     )
-        # self.bioes_class_name2idx = {name: idx for idx, name in enumerate(self.bioes_class_names)}
-        self.bioes_class_name2idx = {
-            'B_answer': 0,
-            'B_header': 1,
-            'B_question': 2,
-            'E_answer': 3,
-            'E_header': 4,
-            'E_question': 5,
-            'I_answer': 6,
-            'I_header': 7,
-            'I_question': 8,
-            'other': 9,
-            'S_answer': 10,
-            'S_header': 11,
-            'S_question': 12
-        }
         self.out_class_name = 'other'
-        self.ignore_label_id = -100
-        self.bioes_class_names = list(self.bioes_class_name2idx.keys())
+        self.bioes_class_names = [self.out_class_name]
+        for class_name in self.class_names:
+            self.bioes_class_names.extend(
+                [
+                    f"B_{class_name}",
+                    f"I_{class_name}",
+                    f"E_{class_name}",
+                    f"S_{class_name}",
+                ]
+            )
+        self.bioes_class_name2idx = {name: idx for idx, name in enumerate(self.bioes_class_names)}
+        # self.bioes_class_name2idx = {
+        #     'B_answer': 0,
+        #     'B_header': 1,
+        #     'B_question': 2,
+        #     'E_answer': 3,
+        #     'E_header': 4,
+        #     'E_question': 5,
+        #     'I_answer': 6,
+        #     'I_header': 7,
+        #     'I_question': 8,
+        #     'other': 9,
+        #     'S_answer': 10,
+        #     'S_header': 11,
+        #     'S_question': 12
+        # }
 
 
 
@@ -702,7 +701,7 @@ if __name__ == "__main__":
             "max_seq_length": 512,
         },
         "train": {
-            "ckpt_path": "/home/jinho/Projects/bros/finetune_funsd_ee_bioes/bros-base-uncased_funsd_bioes_tagging/20230730_212043/checkpoints/bros-funsd-epoch=04-val_loss=0.45.ckpt",
+            "ckpt_path": "finetune_funsd_ee_bioes/bros-base-uncased_funsd_bioes_tagging/20230730_212043/checkpoints/bros-funsd-epoch=04-val_loss=0.45.ckpt", # or None
             "batch_size": 16,
             "num_samples_per_epoch": 526,
             "max_epochs": 30,
