@@ -684,7 +684,7 @@ def train(cfg):
         gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
     )
 
-    trainer.fit(model_module, data_module)
+    trainer.fit(model_module, data_module, ckpt_path=cfg.train.get("ckpt_path", None))
 
 if __name__ == "__main__":
     # load training config
@@ -702,6 +702,7 @@ if __name__ == "__main__":
             "max_seq_length": 512,
         },
         "train": {
+            "ckpt_path": "/home/jinho/Projects/bros/finetune_funsd_ee_bioes/bros-base-uncased_funsd_bioes_tagging/20230730_212043/checkpoints/bros-funsd-epoch=04-val_loss=0.45.ckpt",
             "batch_size": 16,
             "num_samples_per_epoch": 526,
             "max_epochs": 30,
