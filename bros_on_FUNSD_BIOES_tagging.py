@@ -91,23 +91,6 @@ class FUNSDBIOESDataset(Dataset):
                 ]
             )
         self.bioes_class_name2idx = {name: idx for idx, name in enumerate(self.bioes_class_names)}
-        # self.bioes_class_name2idx = {
-        #     'B_answer': 0,
-        #     'B_header': 1,
-        #     'B_question': 2,
-        #     'E_answer': 3,
-        #     'E_header': 4,
-        #     'E_question': 5,
-        #     'I_answer': 6,
-        #     'I_header': 7,
-        #     'I_question': 8,
-        #     'other': 9,
-        #     'S_answer': 10,
-        #     'S_header': 11,
-        #     'S_question': 12
-        # }
-
-
 
     def __len__(self):
         return len(self.examples)
