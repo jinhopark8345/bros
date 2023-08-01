@@ -109,8 +109,8 @@ class FUNSDBIOESDataset(Dataset):
         for idx, (bbox, text) in enumerate(zip(bboxes, texts)):
             input_ids = self.tokenizer.encode(text, add_special_tokens=False)
 
-            word_input_ids.extend(input_ids)
-            word_bboxes.extend([bbox for _ in range(len(input_ids))])
+            word_input_ids.append(input_ids)
+            word_bboxes.append([bbox for _ in range(len(input_ids))])
 
             # bioes tagging for known classes (except Other class)
             if label != self.out_class_name:
@@ -125,7 +125,7 @@ class FUNSDBIOESDataset(Dataset):
                         token_labels = ["I_" + label] + [self.pad_token] * (len(input_ids) - 1)
             else:
                 token_labels = [label] + [self.pad_token] * (len(input_ids) - 1)
-            word_labels.extend(token_labels)
+            word_labels.append(token_labels)
 
 
 
@@ -165,9 +165,9 @@ class FUNSDBIOESDataset(Dataset):
             if word_input_ids == []:
                 continue
 
-            input_ids_list.append(word_input_ids)
-            labels_list.append(word_labels)
-            bboxes_list.append(word_bboxes)
+            input_ids_list.extend(word_input_ids)
+            labels_list.extend(word_labels)
+            bboxes_list.extend(word_bboxes)
 
         tokens_length_list: List[int] = [len(l) for l in input_ids_list]
 
@@ -239,7 +239,6 @@ class FUNSDBIOESDataset(Dataset):
         }
 
         return return_dict
-
 
 class BROSDataPLModule(pl.LightningDataModule):
     def __init__(self, cfg):
@@ -653,6 +652,7 @@ def train(cfg):
         num_sanity_val_steps=3,
         gradient_clip_val=cfg.train.clip_gradient_value,
         gradient_clip_algorithm=cfg.train.clip_gradient_algorithm,
+        log_every_n_steps=5,
     )
 
     trainer.fit(model_module, data_module, ckpt_path=cfg.train.get("ckpt_path", None))
@@ -675,7 +675,7 @@ if __name__ == "__main__":
         "train": {
             "ckpt_path": None, # or None
             "batch_size": 16,
-            "num_samples_per_epoch": 526,
+            "num_samples_per_epoch": 150,
             "max_epochs": 30,
             "use_fp16": True,
             "accelerator": "gpu",
