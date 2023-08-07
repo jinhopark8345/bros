@@ -79,11 +79,12 @@ class FUNSDSpadeDataset(Dataset):
 
         padded_input_ids = np.ones(self.max_seq_length, dtype=int) * self.pad_token_id
         padded_bboxes = np.zeros((self.max_seq_length, 4), dtype=np.float32)
-        padded_labels = np.ones(self.max_seq_length, dtype=int) * -100
         attention_mask = np.zeros(self.max_seq_length, dtype=int)
         are_box_first_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
         are_box_end_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
 
+        itc_labels = np.zeros(self.max_seq_length, dtype=int)
+        stc_labels = np.ones(self.max_seq_length, dtype=np.int64) * self.max_seq_length
 
         input_ids_list: List[List[int]] = []
         labels_list: List[List[str]] = []
@@ -104,43 +105,63 @@ class FUNSDSpadeDataset(Dataset):
 
         # save classes_dic
         text_box_idx = 0
+        input_ids = []
+        bboxes = []
+        box_to_token_indices = []
+        cum_token_idx = 0
         label2text_box_indices_list = {cls_name: [] for cls_name in self.class_names}
         for (word, label) in word_and_label_list:
-            if label == self.out_class_name:
-                text_box_idx += len(word)
-                continue
 
             text_box_indices = []
             for text_and_box in word:
                 text_box_indices.append(text_box_idx)
                 text_box_idx += 1
 
+                text, box = text_and_box['text'], text_and_box['box']
+                this_box_token_indices = []
+
+                if text.strip() == "":
+                    continue
+
+                tokens = self.tokenizer.encode(text, add_special_tokens=False)
+                input_ids += tokens
+                bb = [box for _ in range(len(tokens))]
+                bboxes += bb
+
+                for _ in tokens:
+                    cum_token_idx += 1
+                    this_box_token_indices.append(cum_token_idx)
+
+                box_to_token_indices.append(this_box_token_indices)
+
             label2text_box_indices_list[label].append(text_box_indices)
 
 
-        input_ids = []
-        bboxes = []
-        box_to_token_indices = []
-        cum_token_idx = 0
-
-        text_box_list = [text_and_box for (word, label) in word_and_label_list for text_and_box in word]
-        for text_box in text_box_list:
-            text, box = text_box['text'], text_box['box']
-            this_box_token_indices = []
-
-            if text.strip() == "":
+        # make itc(initial token), stc (sequence token) labels
+        for class_name in self.class_names:
+            if class_name == self.out_class_name:
+                continue
+            if class_name not in label2text_box_indices_list:
                 continue
 
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
-            input_ids += tokens
-            bb = [box for _ in range(len(tokens))]
-            bboxes += bb
+            for word_list in label2text_box_indices_list[class_name]:
+                is_first, last_word_idx = True, -1
+                for word_idx in word_list:
+                    if word_idx >= len(box_to_token_indices):
+                        break
+                    box2token_list = box_to_token_indices[word_idx]
+                    for converted_word_idx in box2token_list:
+                        if converted_word_idx >= self.max_seq_length:
+                            break  # out of idx
 
-            for _ in tokens:
-                cum_token_idx += 1
-                this_box_token_indices.append(cum_token_idx)
-
-            box_to_token_indices.append(this_box_token_indices)
+                        if is_first:
+                            itc_labels[converted_word_idx] = self.class_idx_dic[
+                                class_name
+                            ]
+                            is_first, last_word_idx = False, converted_word_idx
+                        else:
+                            stc_labels[converted_word_idx] = last_word_idx
+                            last_word_idx = converted_word_idx
 
         # For [CLS] and [SEP]
         input_ids = [self.cls_token_id] + input_ids[: self.max_seq_length - 2] + [self.sep_token_id]
@@ -150,7 +171,6 @@ class FUNSDSpadeDataset(Dataset):
         else:  # len(list_bbs) > 0
             bboxes = [cls_bbs] + bboxes[: self.max_seq_length - 2] + [sep_bbs]
         bboxes = np.array(bboxes)
-
 
         # update ppadded input_ids, labels, bboxes
         len_ori_input_ids = len(input_ids)
@@ -166,32 +186,24 @@ class FUNSDSpadeDataset(Dataset):
         padded_bboxes[:, [0, 2, 4, 6]] = padded_bboxes[:, [0, 2, 4, 6]] / width
         padded_bboxes[:, [1, 3, 5, 7]] = padded_bboxes[:, [1, 3, 5, 7]] / height
 
+        # convert to tensor
         padded_input_ids = torch.from_numpy(padded_input_ids)
         padded_bboxes = torch.from_numpy(padded_bboxes)
         attention_mask = torch.from_numpy(attention_mask)
+        itc_labels = torch.from_numpy(itc_labels)
+        are_box_first_tokens = torch.from_numpy(are_box_first_tokens)
+        are_box_end_tokens = torch.from_numpy(are_box_end_tokens)
+        stc_labels = torch.from_numpy(stc_labels)
 
-        ## need to work on making itc labels and stc labels!!!!!!!
-
-
-        breakpoint()
-
-
-
-
-        # return_dict = {
-        #     "input_ids": padded_input_ids,
-        #     "bbox": padded_bboxes,
-        #     "attention_mask": attention_mask,
-        #     "are_box_first_tokens": are_box_first_tokens,
-        #     "are_box_end_tokens": are_box_end_tokens,
-        #     "labels": padded_labels,
-        # }
-
-        # breakpoint()
-
-
-        return ""
-
+        return_dict = {
+            "input_ids": input_ids,
+            "bbox": bbox,
+            "attention_mask": attention_mask,
+            "itc_labels": itc_labels,
+            "are_box_first_tokens": are_box_first_tokens,
+            "are_box_end_tokens": are_box_end_tokens,
+            "stc_labels": stc_labels,
+        }
 
 
 @dataclass
