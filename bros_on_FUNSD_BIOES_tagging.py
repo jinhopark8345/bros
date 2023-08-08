@@ -630,10 +630,11 @@ def train(cfg):
         # then checkpoint and huggingface model are not guaranteed to be matching
         # because we are saving with huggingface model with save_pretrained method
         # in "on_save_checkpoint" method in "BROSModelPLModule"
+        mode='min',
     )
 
     model_summary_callback = ModelSummary(max_depth=5)
-    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="max")
+    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min")
 
     # define Trainer and start training
     trainer = pl.Trainer(

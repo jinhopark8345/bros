@@ -113,6 +113,7 @@ class BrosConfig(PretrainedConfig):
         pad_token_id=0,
         bbox_scale=100.0,
         pe_type="crel",
+        n_relations=1,
         **kwargs
     ):
         super().__init__(
@@ -134,3 +135,4 @@ class BrosConfig(PretrainedConfig):
 
         self.bbox_scale = bbox_scale
         self.pe_type = pe_type
+        self.n_relations = n_relations
