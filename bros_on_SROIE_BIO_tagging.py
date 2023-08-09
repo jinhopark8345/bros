@@ -19,27 +19,29 @@ from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 from overrides import overrides
 from pytorch_lightning.callbacks import (
+    EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
     ModelSummary,
     TQDMProgressBar,
-    EarlyStopping,
 )
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-
 from pytorch_lightning.plugins import CheckpointIO
 from pytorch_lightning.utilities import rank_zero_only
-
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
-from transformers import AutoTokenizer
-from transformers import BrosForTokenClassification
-from transformers import BrosConfig, BrosTokenizer
+from transformers import (
+    AutoTokenizer,
+    BrosConfig,
+    BrosForTokenClassification,
+    BrosTokenizer,
+)
 
 from datasets import load_dataset, load_from_disk
+
 
 def linear_scheduler(optimizer, warmup_steps, training_steps, last_epoch=-1):
     """linear_scheduler with warmup from huggingface"""
@@ -79,20 +81,14 @@ def multistep_scheduler(optimizer, warmup_steps, milestones, gamma=0.1, last_epo
         else:
             # calculate a multistep lr scaling ratio
             idx = np.searchsorted(milestones, current_step)
-            return gamma ** idx
+            return gamma**idx
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
-
 class SROIEBIODataset(Dataset):
     def __init__(
-        self,
-        dataset,
-        tokenizer,
-        max_seq_length=512,
-        split='train',
-        bio_format=True
+        self, dataset, tokenizer, max_seq_length=512, split="train", bio_format=True
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
@@ -107,7 +103,7 @@ class SROIEBIODataset(Dataset):
 
         self.examples = load_dataset(self.dataset)[split]
 
-        self.class_names = ['address', 'company', 'date', 'total']
+        self.class_names = ["address", "company", "date", "total"]
         self.bio_class_names = ["O"]
         for class_name in self.class_names:
             self.bio_class_names.extend([f"B_{class_name}", f"I_{class_name}"])
@@ -124,10 +120,10 @@ class SROIEBIODataset(Dataset):
     def __getitem__(self, idx):
         sample = self.examples[idx]
 
-        width, height = sample['img'].size
-        words: List[str] = sample['words']
-        bboxes: List[List[int]] = sample['bboxes']
-        labels: List[str] = sample['labels']
+        width, height = sample["img"].size
+        words: List[str] = sample["words"]
+        bboxes: List[List[int]] = sample["bboxes"]
+        labels: List[str] = sample["labels"]
 
         sep_bbs = [width, height] * 2
         cls_bbs = [0] * 4
@@ -135,9 +131,10 @@ class SROIEBIODataset(Dataset):
         are_box_first_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
         are_box_end_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
 
-
         # encode(tokenize) each word from words (List[str])
-        input_ids_list: List[List[int]] = [self.tokenizer.encode(e, add_special_tokens=False) for e in words]
+        input_ids_list: List[List[int]] = [
+            self.tokenizer.encode(e, add_special_tokens=False) for e in words
+        ]
         tokens_length_list: List[int] = [len(l) for l in input_ids_list]
 
         # each word is splited into tokens, and since only have bbox for each word, tokens from same word get same bbox
@@ -146,7 +143,7 @@ class SROIEBIODataset(Dataset):
         end_indices = np.array(list(itertools.accumulate(tokens_length_list))) + 1
         st_indices = end_indices - np.array(tokens_length_list)
 
-        end_indices = end_indices[end_indices < self.max_seq_length -1]
+        end_indices = end_indices[end_indices < self.max_seq_length - 1]
         if len(st_indices) > len(end_indices):
             st_indices = st_indices[: len(end_indices)]
 
@@ -156,23 +153,26 @@ class SROIEBIODataset(Dataset):
 
         # duplicate each word's bbox to length of tokens (of each word)
         # e.g. AAA -> (tokenize) -> A, A, A then copy bbox of AAA 3 times
-        bboxes_list: List[List[List[int]]] = [[bboxes[idx] for _ in range(len(l))] for idx, l in enumerate(input_ids_list)]
+        bboxes_list: List[List[List[int]]] = [
+            [bboxes[idx] for _ in range(len(l))] for idx, l in enumerate(input_ids_list)
+        ]
 
         # do duplicate each word's label to length of tokens (of each word)
         # if the word's label starts with 'B' tag, then convert input_ids' label to ['B', 'I', 'I', ...]
         labels_list: List[List[str]] = []
         for idx, l in enumerate(input_ids_list):
             word_label = labels[idx]
-            if word_label.startswith('B_'):
+            if word_label.startswith("B_"):
                 class_name = word_label.split("_")[1]
-                input_ids_label = [word_label] + ["I_" + class_name for _ in range(len(l) - 1)]
+                input_ids_label = [word_label] + [
+                    "I_" + class_name for _ in range(len(l) - 1)
+                ]
             else:
                 input_ids_label = [word_label for _ in range(len(l))]
             labels_list.append(input_ids_label)
 
-
         # flatten input_ids, bboxes, labels
-        input_ids: List[int] =list(itertools.chain.from_iterable(input_ids_list))
+        input_ids: List[int] = list(itertools.chain.from_iterable(input_ids_list))
         bboxes: List[List[int]] = list(itertools.chain.from_iterable(bboxes_list))
         labels: List[str] = list(itertools.chain.from_iterable(labels_list))
 
@@ -183,7 +183,11 @@ class SROIEBIODataset(Dataset):
         # For [CLS] and [SEP]
 
         ### update input_ids with correspoding cls_token_id in the begining and sep_token_id in the end
-        input_ids = [self.cls_token_id] + input_ids[: self.max_seq_length - 2] + [self.sep_token_id]
+        input_ids = (
+            [self.cls_token_id]
+            + input_ids[: self.max_seq_length - 2]
+            + [self.sep_token_id]
+        )
 
         # # are_box_first_tokens = [False] + are_box_first_tokens[: self.max_seq_length - 2] + [False]
         # are_box_first_tokens = np.insert(are_box_first_tokens, 0, 0)
@@ -194,16 +198,15 @@ class SROIEBIODataset(Dataset):
         # are_box_end_tokens[-1] = 0
 
         ### update labels
-        labels = ['O'] + labels[: self.max_seq_length - 2] + ['O']
+        labels = ["O"] + labels[: self.max_seq_length - 2] + ["O"]
         labels = [self.bio_class_name2idx[l] for l in labels]
 
         ### update bboxes with correspoding cls_token bbox in the begining and sep_token bbox in the end
-        if len(bboxes) == 0: # When len(json_obj["words"]) == 0 (no OCR result)
+        if len(bboxes) == 0:  # When len(json_obj["words"]) == 0 (no OCR result)
             bboxes = [cls_bbs] + [sep_bbs]
         else:  # len(list_bbs) > 0
             bboxes = [cls_bbs] + bboxes[: self.max_seq_length - 2] + [sep_bbs]
         ##############################################################
-
 
         ##############################################################
         # prepare padded input_ids, bboxes (padded to self.max_seq_length)
@@ -218,7 +221,6 @@ class SROIEBIODataset(Dataset):
         attention_mask = np.zeros(self.max_seq_length, dtype=int)
         attention_mask[:len_ori_input_ids] = 1
 
-
         # prepare padded_bboxes
         padded_bboxes = np.zeros((self.max_seq_length, 4), dtype=np.float32)
 
@@ -229,14 +231,12 @@ class SROIEBIODataset(Dataset):
         padded_bboxes[:len_ori_input_ids, :] = bboxes
         ##############################################################
 
-
         # expand bbox from [x1, y1, x2, y2] (2points) -> [x1, y1, x2, y1, x2, y2, x1, y2] (4points)
         padded_bboxes = padded_bboxes[:, [0, 1, 2, 1, 2, 3, 0, 3]]
 
         # Normalize bbox -> 0 ~ 1
         padded_bboxes[:, [0, 2, 4, 6]] = padded_bboxes[:, [0, 2, 4, 6]] / width
         padded_bboxes[:, [1, 3, 5, 7]] = padded_bboxes[:, [1, 3, 5, 7]] / height
-
 
         padded_input_ids = torch.from_numpy(padded_input_ids)
         padded_bboxes = torch.from_numpy(padded_bboxes)
@@ -253,7 +253,6 @@ class SROIEBIODataset(Dataset):
             "are_box_first_tokens": are_box_first_tokens,
             "are_box_end_tokens": are_box_end_tokens,
         }
-
 
         return return_dict
 
@@ -363,10 +362,9 @@ class BROSModelPLModule(pl.LightningModule):
         bbox = batch["bbox"]
         attention_mask = batch["attention_mask"]
         are_box_first_tokens = batch["are_box_first_tokens"]
-        are_box_end_tokens  = batch["are_box_end_tokens"]
+        are_box_end_tokens = batch["are_box_end_tokens"]
         gt_labels = batch["bio_labels"]
         labels = batch["bio_labels"]
-
 
         # inference model
         prediction = self.model(
@@ -383,11 +381,14 @@ class BROSModelPLModule(pl.LightningModule):
         n_batch_gt_classes, n_batch_pred_classes, n_batch_correct_classes = 0, 0, 0
         batch_size = prediction.logits.shape[0]
 
-        for example_idx, (pred_label, gt_label, box_first_token_mask, box_end_token_mask) in enumerate(
+        for example_idx, (
+            pred_label,
+            gt_label,
+            box_first_token_mask,
+            box_end_token_mask,
+        ) in enumerate(
             zip(pred_labels, gt_labels, are_box_first_tokens, are_box_end_tokens)
         ):
-
-
             # validation loss : # calculate validation loss of "box_first_tokens" only
             valid_gt_label = gt_label[box_first_token_mask]
             valid_pred_label = pred_label[box_first_token_mask]
@@ -412,22 +413,37 @@ class BROSModelPLModule(pl.LightningModule):
             [{(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)}, {(0, 1, 2, 3)}, {(45,)}, {(113,)}]
             """
 
-
-            n_gt_classes = sum([len(gt_parse[class_idx]) for class_idx in range(len(self.class_names))])
-            n_pred_classes = sum([len(pred_parse[class_idx]) for class_idx in range(len(self.class_names))])
+            n_gt_classes = sum(
+                [len(gt_parse[class_idx]) for class_idx in range(len(self.class_names))]
+            )
+            n_pred_classes = sum(
+                [
+                    len(pred_parse[class_idx])
+                    for class_idx in range(len(self.class_names))
+                ]
+            )
             n_correct_classes = sum(
-                [len(gt_parse[class_idx] & pred_parse[class_idx]) for class_idx in range(len(self.class_names))]
+                [
+                    len(gt_parse[class_idx] & pred_parse[class_idx])
+                    for class_idx in range(len(self.class_names))
+                ]
             )
             n_batch_gt_classes += n_gt_classes
             n_batch_pred_classes += n_pred_classes
             n_batch_correct_classes += n_correct_classes
 
             box_first_token_idx2ori_idx = box_first_token_mask.nonzero(as_tuple=True)[0]
-            box2token_span_maps = torch.hstack((
-                (box_first_token_mask == True).nonzero(),
-                (box_end_token_mask == True).nonzero()
-            )).cpu().numpy()
-            start_token_idx2end_token_idx = {e[0]:e[1] for e in box2token_span_maps}
+            box2token_span_maps = (
+                torch.hstack(
+                    (
+                        (box_first_token_mask == True).nonzero(),
+                        (box_end_token_mask == True).nonzero(),
+                    )
+                )
+                .cpu()
+                .numpy()
+            )
+            start_token_idx2end_token_idx = {e[0]: e[1] for e in box2token_span_maps}
 
             pred_cls2text = {name: [] for name in self.class_names}
             gt_cls2text = deepcopy(pred_cls2text)
@@ -436,30 +452,86 @@ class BROSModelPLModule(pl.LightningModule):
             for cls_idx, cls_name in enumerate(self.class_names):
                 # all pred text for cls
                 for box_first_token_indices in pred_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
                     pred_text = self.tokenizer.decode(input_ids[example_idx][text_span])
                     pred_cls2text[cls_name].append(pred_text)
 
                 # all gt text for cls
                 for box_first_token_indices in gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
                     gt_text = self.tokenizer.decode(input_ids[example_idx][text_span])
                     gt_cls2text[cls_name].append(gt_text)
 
                 # all correct text for cls
                 for box_first_token_indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    correct_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
+                    correct_text = self.tokenizer.decode(
+                        input_ids[example_idx][text_span]
+                    )
                     correct_cls2text[cls_name].append(correct_text)
 
                 # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
                 for box_first_token_indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    incorrect_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
+                    incorrect_text = self.tokenizer.decode(
+                        input_ids[example_idx][text_span]
+                    )
                     incorrect_cls2text[cls_name].append(incorrect_text)
 
         print(f"{pred_cls2text = }")
@@ -658,11 +730,13 @@ def train(cfg):
         # then checkpoint and huggingface model are not guaranteed to be matching
         # because we are saving with huggingface model with save_pretrained method
         # in "on_save_checkpoint" method in "BROSModelPLModule"
-        mode='min',
+        mode="min",
     )
 
     model_summary_callback = ModelSummary(max_depth=5)
-    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min")
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min"
+    )
 
     # define Trainer and start training
     trainer = pl.Trainer(
@@ -684,6 +758,7 @@ def train(cfg):
     )
 
     trainer.fit(model_module, data_module)
+
 
 if __name__ == "__main__":
     # load training config

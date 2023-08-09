@@ -19,31 +19,29 @@ from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 from overrides import overrides
 from pytorch_lightning.callbacks import (
+    EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
     ModelSummary,
     TQDMProgressBar,
-    EarlyStopping,
 )
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-
 from pytorch_lightning.plugins import CheckpointIO
 from pytorch_lightning.utilities import rank_zero_only
-
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
-from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
-from transformers import AutoTokenizer
-
-from transformers import BrosForTokenClassificationWithSpade
-from transformers import BrosConfig, BrosTokenizer
+from transformers import (
+    AutoTokenizer,
+    BrosConfig,
+    BrosForTokenClassificationWithSpade,
+    BrosTokenizer,
+)
 
 from datasets import load_dataset, load_from_disk
 
-torch.set_printoptions(threshold=2000000)
 
 def linear_scheduler(optimizer, warmup_steps, training_steps, last_epoch=-1):
     """linear_scheduler with warmup from huggingface"""
@@ -83,12 +81,13 @@ def multistep_scheduler(optimizer, warmup_steps, milestones, gamma=0.1, last_epo
         else:
             # calculate a multistep lr scaling ratio
             idx = np.searchsorted(milestones, current_step)
-            return gamma ** idx
+            return gamma**idx
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
+
 class FUNSDSpadeDataset(Dataset):
-    """ FUNSD BIOES tagging Dataset
+    """FUNSD BIOES tagging Dataset
 
     FUNSD : Form Understanding in Noisy Scanned Documents
 
@@ -99,7 +98,7 @@ class FUNSDSpadeDataset(Dataset):
         dataset,
         tokenizer,
         max_seq_length=512,
-        split='train',
+        split="train",
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
@@ -113,9 +112,11 @@ class FUNSDSpadeDataset(Dataset):
 
         self.examples = load_dataset(self.dataset)[split]
 
-        self.class_names = ['other', 'header', 'question', 'answer']
-        self.out_class_name = 'other'
-        self.class_idx_dic = {cls_name: idx for idx, cls_name in enumerate(self.class_names)}
+        self.class_names = ["other", "header", "question", "answer"]
+        self.out_class_name = "other"
+        self.class_idx_dic = {
+            cls_name: idx for idx, cls_name in enumerate(self.class_names)
+        }
         self.pad_token = self.tokenizer.pad_token
         self.ignore_label_id = -100
 
@@ -125,13 +126,13 @@ class FUNSDSpadeDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.examples[idx]
 
-        word_labels = sample['labels']
-        words = sample['words']
+        word_labels = sample["labels"]
+        words = sample["words"]
         assert len(word_labels) == len(words)
 
-        width, height = sample['img'].size
-        cls_bbs = [0] * 4 # bbox for first token
-        sep_bbs = [width, height] * 2 # bbox for last token
+        width, height = sample["img"].size
+        cls_bbs = [0] * 4  # bbox for first token
+        sep_bbs = [width, height] * 2  # bbox for last token
 
         padded_input_ids = np.ones(self.max_seq_length, dtype=int) * self.pad_token_id
         padded_bboxes = np.zeros((self.max_seq_length, 4), dtype=np.float32)
@@ -153,7 +154,7 @@ class FUNSDSpadeDataset(Dataset):
         for word, label in zip(words, word_labels):
             cur_word_and_label = []
             for e in word:
-                if e['text'].strip() != '':
+                if e["text"].strip() != "":
                     cur_word_and_label.append(e)
             if cur_word_and_label:
                 word_and_label_list.append((cur_word_and_label, label))
@@ -165,14 +166,13 @@ class FUNSDSpadeDataset(Dataset):
         box_to_token_indices = []
         cum_token_idx = 0
         label2text_box_indices_list = {cls_name: [] for cls_name in self.class_names}
-        for (word, label) in word_and_label_list:
-
+        for word, label in word_and_label_list:
             text_box_indices = []
             for text_and_box in word:
                 text_box_indices.append(text_box_idx)
                 text_box_idx += 1
 
-                text, box = text_and_box['text'], text_and_box['box']
+                text, box = text_and_box["text"], text_and_box["box"]
                 this_box_token_indices = []
 
                 if text.strip() == "":
@@ -206,13 +206,12 @@ class FUNSDSpadeDataset(Dataset):
 
         # to make sure st_indices and end_indices are paired, in case st_indices are cut by max_sequence length,
         min_len = min(len(st_indices), len(et_indices))
-        st_indices = st_indices[: min_len]
-        et_indices = et_indices[: min_len]
+        st_indices = st_indices[:min_len]
+        et_indices = et_indices[:min_len]
         assert len(st_indices) == len(et_indices)
 
         are_box_first_tokens[st_indices] = True
         are_box_end_tokens[et_indices] = True
-
 
         # make itc(initial token), stc (sequence token) labels
         for class_name in self.class_names:
@@ -241,7 +240,11 @@ class FUNSDSpadeDataset(Dataset):
                             last_word_idx = converted_word_idx
 
         # For [CLS] and [SEP]
-        input_ids = [self.cls_token_id] + input_ids[: self.max_seq_length - 2] + [self.sep_token_id]
+        input_ids = (
+            [self.cls_token_id]
+            + input_ids[: self.max_seq_length - 2]
+            + [self.sep_token_id]
+        )
         if len(bboxes) == 0:
             # When len(json_obj["words"]) == 0 (no OCR result)
             bboxes = [cls_bbs] + [sep_bbs]
@@ -284,6 +287,7 @@ class FUNSDSpadeDataset(Dataset):
 
         return return_dict
 
+
 class BROSDataPLModule(pl.LightningDataModule):
     def __init__(self, cfg):
         super().__init__()
@@ -323,40 +327,6 @@ class BROSDataPLModule(pl.LightningDataModule):
                 batch[k] = batch[k].to(device)
         return batch
 
-def do_eval_step(batch, head_outputs, loss, eval_kwargs):
-    class_names = eval_kwargs["class_names"]
-    dummy_idx = eval_kwargs["dummy_idx"]
-
-    itc_outputs = head_outputs["itc_outputs"]
-    stc_outputs = head_outputs["stc_outputs"]
-
-    pr_itc_labels = torch.argmax(itc_outputs, -1)
-    pr_stc_labels = torch.argmax(stc_outputs, -1)
-
-    (
-        n_batch_gt_classes,
-        n_batch_pr_classes,
-        n_batch_correct_classes,
-    ) = eval_ee_spade_batch(
-        pr_itc_labels,
-        batch["itc_labels"],
-        batch["are_box_first_tokens"],
-        pr_stc_labels,
-        batch["stc_labels"],
-        batch["attention_mask"],
-        class_names,
-        dummy_idx,
-    )
-
-    step_out = {
-        "loss": loss,
-        "n_batch_gt_classes": n_batch_gt_classes,
-        "n_batch_pr_classes": n_batch_pr_classes,
-        "n_batch_correct_classes": n_batch_correct_classes,
-    }
-
-    return step_out
-
 
 def eval_ee_spade_batch(
     pr_itc_labels,
@@ -370,7 +340,10 @@ def eval_ee_spade_batch(
 ):
     n_batch_gt_classes, n_batch_pr_classes, n_batch_correct_classes = 0, 0, 0
 
-    bsz = pr_itc_labels.shape[0]
+    bsz = gt_itc_labels.shape[0]
+    pr_itc_labels = pr_itc_labels.view(bsz, -1)
+    pr_stc_labels = pr_stc_labels.view(bsz, -1)
+
     for example_idx in range(bsz):
         n_gt_classes, n_pr_classes, n_correct_classes = eval_ee_spade_example(
             pr_itc_labels[example_idx],
@@ -522,8 +495,9 @@ class BROSModelPLModule(pl.LightningModule):
         }
         self.loss_func = nn.CrossEntropyLoss()
         self.class_names = None
-        self.bioes_class_names = None
         self.tokenizer = tokenizer
+        self.dummy_idx = None
+
         self.validation_step_outputs = []
 
     def training_step(self, batch, batch_idx, *args):
@@ -556,7 +530,7 @@ class BROSModelPLModule(pl.LightningModule):
         bbox = batch["bbox"]
         attention_mask = batch["attention_mask"]
         are_box_first_tokens = batch["are_box_first_tokens"]
-        are_box_end_tokens  = batch["are_box_end_tokens"]
+        are_box_end_tokens = batch["are_box_end_tokens"]
         itc_labels = batch["itc_labels"]
         stc_labels = batch["stc_labels"]
 
@@ -570,54 +544,72 @@ class BROSModelPLModule(pl.LightningModule):
             stc_labels=stc_labels,
         )
 
-        # do_eval_step()
+        self.log_dict({"val_loss": prediction.loss}, sync_dist=True, prog_bar=True)
 
-        val_loss = prediction.loss
-        # pred_labels = torch.argmax(prediction.logits, -1)
+        pr_itc_labels = torch.argmax(prediction.itc_logits, -1)
+        pr_stc_labels = torch.argmax(prediction.stc_logits, -1)
 
-        # self.validation_step_outputs.append(step_out)
-        self.log_dict({"val_loss": val_loss}, sync_dist=True, prog_bar=True)
-        # self.log_dict(step_out, sync_dist=True)
+        (
+            n_batch_gt_classes,
+            n_batch_pr_classes,
+            n_batch_correct_classes,
+        ) = eval_ee_spade_batch(
+            pr_itc_labels,
+            itc_labels,
+            are_box_first_tokens,
+            pr_stc_labels,
+            stc_labels,
+            attention_mask,
+            self.class_names,
+            self.dummy_idx,
+        )
 
-        return val_loss
-        # return step_out
+        step_out = {
+            "loss": prediction.loss,
+            "n_batch_gt_classes": n_batch_gt_classes,
+            "n_batch_pr_classes": n_batch_pr_classes,
+            "n_batch_correct_classes": n_batch_correct_classes,
+        }
+        self.validation_step_outputs.append(step_out)
 
-    # def on_validation_epoch_end(self):
-    #     all_preds = self.validation_step_outputs
+        return step_out
 
-    #     n_total_gt_classes, n_total_pr_classes, n_total_correct_classes = 0, 0, 0
+    def on_validation_epoch_end(self):
+        all_preds = self.validation_step_outputs
 
-    #     for step_out in all_preds:
-    #         n_total_gt_classes += step_out["n_batch_gt_classes"]
-    #         n_total_pr_classes += step_out["n_batch_pr_classes"]
-    #         n_total_correct_classes += step_out["n_batch_correct_classes"]
+        n_total_gt_classes, n_total_pr_classes, n_total_correct_classes = 0, 0, 0
 
-    #     precision = (
-    #         0.0
-    #         if n_total_pr_classes == 0
-    #         else n_total_correct_classes / n_total_pr_classes
-    #     )
-    #     recall = (
-    #         0.0
-    #         if n_total_gt_classes == 0
-    #         else n_total_correct_classes / n_total_gt_classes
-    #     )
-    #     f1 = (
-    #         0.0
-    #         if recall * precision == 0
-    #         else 2.0 * recall * precision / (recall + precision)
-    #     )
+        for step_out in all_preds:
+            n_total_gt_classes += step_out["n_batch_gt_classes"]
+            n_total_pr_classes += step_out["n_batch_pr_classes"]
+            n_total_correct_classes += step_out["n_batch_correct_classes"]
 
-    #     self.log_dict(
-    #         {
-    #             "precision": precision,
-    #             "recall": recall,
-    #             "f1": f1,
-    #         },
-    #         sync_dist=True,
-    #     )
+        precision = (
+            0.0
+            if n_total_pr_classes == 0
+            else n_total_correct_classes / n_total_pr_classes
+        )
+        recall = (
+            0.0
+            if n_total_gt_classes == 0
+            else n_total_correct_classes / n_total_gt_classes
+        )
+        f1 = (
+            0.0
+            if recall * precision == 0
+            else 2.0 * recall * precision / (recall + precision)
+        )
 
-    #     self.validation_step_outputs.clear()
+        self.log_dict(
+            {
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+            },
+            sync_dist=True,
+        )
+
+        self.validation_step_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = self._get_optimizer()
@@ -728,8 +720,12 @@ def train(cfg):
     ## update config
     bros_config = BrosConfig.from_pretrained(cfg.model.pretrained_model_name_or_path)
 
-    bros_config.id2label = {i: label for i, label in enumerate(train_dataset.class_names)}
-    bros_config.label2id = {label: i for i, label in enumerate(train_dataset.class_names)}
+    bros_config.id2label = {
+        i: label for i, label in enumerate(train_dataset.class_names)
+    }
+    bros_config.label2id = {
+        label: i for i, label in enumerate(train_dataset.class_names)
+    }
     bros_config.num_labels = len(train_dataset.class_names)
 
     ## load pretrained model
@@ -741,6 +737,8 @@ def train(cfg):
     model_module = BROSModelPLModule(cfg, tokenizer=tokenizer)
     model_module.model = bros_model
     model_module.class_names = train_dataset.class_names
+    model_module.dummy_idx = cfg.model.max_seq_length
+
     # model_module.bioes_class_names = train_dataset.bioes_class_names
 
     # define trainer logger, callbacks
@@ -764,7 +762,9 @@ def train(cfg):
     )
 
     model_summary_callback = ModelSummary(max_depth=5)
-    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min")
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min"
+    )
 
     # define Trainer and start training
     trainer = pl.Trainer(
@@ -788,6 +788,7 @@ def train(cfg):
 
     trainer.fit(model_module, data_module, ckpt_path=cfg.train.get("ckpt_path", None))
 
+
 if __name__ == "__main__":
     # load training config
     finetune_funsd_ee_bioes_config = {
@@ -804,7 +805,7 @@ if __name__ == "__main__":
             "max_seq_length": 512,
         },
         "train": {
-            "ckpt_path": None, # or None
+            "ckpt_path": None,  # or None
             "batch_size": 1,
             "num_samples_per_epoch": 149,
             "max_epochs": 30,

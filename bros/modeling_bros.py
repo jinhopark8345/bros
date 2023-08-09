@@ -1993,16 +1993,6 @@ class BrosForTokenClassificationWithSpade(BrosPreTrainedModel):
             stc_labels = stc_labels[stc_mask]
 
             stc_loss = loss_fct(stc_logits, stc_labels)
-            # if stc_mask is not None:
-            #     stc_loss = loss_fct(
-            #         stc_outputs.view(-1, stc_outputs.shape[-1])[stc_mask],
-            #         stc_labels.view(-1)[stc_mask]
-            #     )
-            # else:
-            #     stc_loss = loss_fct(
-            #         stc_outputs.view(-1, stc_outputs.shape[-1]),
-            #         stc_labels.view(-1)
-            #     )
 
             loss = itc_loss + stc_loss
 

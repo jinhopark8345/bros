@@ -19,27 +19,29 @@ from omegaconf import OmegaConf
 from omegaconf.dictconfig import DictConfig
 from overrides import overrides
 from pytorch_lightning.callbacks import (
+    EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
     ModelSummary,
     TQDMProgressBar,
-    EarlyStopping,
 )
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
-
 from pytorch_lightning.plugins import CheckpointIO
 from pytorch_lightning.utilities import rank_zero_only
-
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import (
+    AutoTokenizer,
+    BrosConfig,
+    BrosForTokenClassification,
+    BrosTokenizer,
+)
 
-from transformers import BrosForTokenClassification
-from transformers import BrosConfig, BrosTokenizer
 from datasets import load_dataset, load_from_disk
+
 
 def linear_scheduler(optimizer, warmup_steps, training_steps, last_epoch=-1):
     """linear_scheduler with warmup from huggingface"""
@@ -79,13 +81,13 @@ def multistep_scheduler(optimizer, warmup_steps, milestones, gamma=0.1, last_epo
         else:
             # calculate a multistep lr scaling ratio
             idx = np.searchsorted(milestones, current_step)
-            return gamma ** idx
+            return gamma**idx
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 class FUNSDBIOESDataset(Dataset):
-    """ FUNSD BIOES tagging Dataset
+    """FUNSD BIOES tagging Dataset
 
     FUNSD : Form Understanding in Noisy Scanned Documents
     BIOES tagging : begin, in, out, end, single tagging
@@ -97,7 +99,7 @@ class FUNSDBIOESDataset(Dataset):
         dataset,
         tokenizer,
         max_seq_length=512,
-        split='train',
+        split="train",
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
@@ -111,12 +113,12 @@ class FUNSDBIOESDataset(Dataset):
 
         self.examples = load_dataset(self.dataset)[split]
 
-        self.class_names = ['header', 'question', 'answer']
+        self.class_names = ["header", "question", "answer"]
         self.pad_token = self.tokenizer.pad_token
         self.ignore_label_id = -100
 
         # self.out_class_name = "other"
-        self.out_class_name = 'other'
+        self.out_class_name = "other"
         self.bioes_class_names = [self.out_class_name]
         for class_name in self.class_names:
             self.bioes_class_names.extend(
@@ -127,18 +129,20 @@ class FUNSDBIOESDataset(Dataset):
                     f"S_{class_name}",
                 ]
             )
-        self.bioes_class_name2idx = {name: idx for idx, name in enumerate(self.bioes_class_names)}
+        self.bioes_class_name2idx = {
+            name: idx for idx, name in enumerate(self.bioes_class_names)
+        }
 
     def __len__(self):
         return len(self.examples)
 
     def tokenize_word_and_tag_bioes(self, word, label):
-        word = [e for e in word if e['text'].strip() != '']
+        word = [e for e in word if e["text"].strip() != ""]
         if len(word) == 0:
             return [], [], []
 
-        bboxes = [e['box'] for e in word]
-        texts = [e['text'] for e in word]
+        bboxes = [e["box"] for e in word]
+        texts = [e["text"] for e in word]
 
         word_input_ids = []
         word_bboxes = []
@@ -151,20 +155,28 @@ class FUNSDBIOESDataset(Dataset):
 
             # bioes tagging for known classes (except Other class)
             if label != self.out_class_name:
-                if len(word) == 1: # single text in the word
-                    token_labels = ["S_" + label] + [self.pad_token] * (len(input_ids) - 1)
+                if len(word) == 1:  # single text in the word
+                    token_labels = ["S_" + label] + [self.pad_token] * (
+                        len(input_ids) - 1
+                    )
                 else:
-                    if idx == 0: # multiple text in the word and first text of that
-                        token_labels = ["B_" + label] + [self.pad_token] * (len(input_ids) - 1)
-                    elif idx == len(word) - 1: # multiple text in the word and last text of that
-                        token_labels = ["E_" + label] + [self.pad_token] * (len(input_ids) - 1)
-                    else: # rest of the text in the word
-                        token_labels = ["I_" + label] + [self.pad_token] * (len(input_ids) - 1)
+                    if idx == 0:  # multiple text in the word and first text of that
+                        token_labels = ["B_" + label] + [self.pad_token] * (
+                            len(input_ids) - 1
+                        )
+                    elif (
+                        idx == len(word) - 1
+                    ):  # multiple text in the word and last text of that
+                        token_labels = ["E_" + label] + [self.pad_token] * (
+                            len(input_ids) - 1
+                        )
+                    else:  # rest of the text in the word
+                        token_labels = ["I_" + label] + [self.pad_token] * (
+                            len(input_ids) - 1
+                        )
             else:
                 token_labels = [label] + [self.pad_token] * (len(input_ids) - 1)
             word_labels.append(token_labels)
-
-
 
         assert len(word_input_ids) > 0
         assert len(word_input_ids) == len(word_bboxes) == len(word_labels)
@@ -174,13 +186,13 @@ class FUNSDBIOESDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.examples[idx]
 
-        word_labels = sample['labels']
-        words = sample['words']
+        word_labels = sample["labels"]
+        words = sample["words"]
         assert len(word_labels) == len(words)
 
-        width, height = sample['img'].size
-        cls_bbs = [0] * 4 # bbox for first token
-        sep_bbs = [width, height] * 2 # bbox for last token
+        width, height = sample["img"].size
+        cls_bbs = [0] * 4  # bbox for first token
+        sep_bbs = [width, height] * 2  # bbox for last token
 
         padded_input_ids = np.ones(self.max_seq_length, dtype=int) * self.pad_token_id
         padded_bboxes = np.zeros((self.max_seq_length, 4), dtype=np.float32)
@@ -189,7 +201,6 @@ class FUNSDBIOESDataset(Dataset):
         are_box_first_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
         are_box_end_tokens = np.zeros(self.max_seq_length, dtype=np.bool_)
 
-
         input_ids_list: List[List[int]] = []
         labels_list: List[List[str]] = []
         bboxes_list: List[List[List[int]]] = []
@@ -197,7 +208,9 @@ class FUNSDBIOESDataset(Dataset):
         end_token_indices = []
 
         for word_idx, (label, word) in enumerate(zip(word_labels, words)):
-            word_input_ids, word_bboxes, word_labels = self.tokenize_word_and_tag_bioes(word, label)
+            word_input_ids, word_bboxes, word_labels = self.tokenize_word_and_tag_bioes(
+                word, label
+            )
 
             if word_input_ids == []:
                 continue
@@ -221,8 +234,8 @@ class FUNSDBIOESDataset(Dataset):
 
         # to make sure st_indices and end_indices are paired, in case st_indices are cut by max_sequence length,
         min_len = min(len(st_indices), len(et_indices))
-        st_indices = st_indices[: min_len]
-        et_indices = et_indices[: min_len]
+        st_indices = st_indices[:min_len]
+        et_indices = et_indices[:min_len]
         assert len(st_indices) == len(et_indices)
 
         input_ids: List[int] = list(itertools.chain.from_iterable(input_ids_list))
@@ -232,14 +245,23 @@ class FUNSDBIOESDataset(Dataset):
         assert len(input_ids) == len(bboxes) == len(labels)
 
         # CLS, EOS token update for input_ids, labels, bboxes
-        input_ids = [self.cls_token_id] + input_ids[: self.max_seq_length - 2] + [self.sep_token_id]
-        if len(bboxes) == 0: # When len(json_obj["words"]) == 0 (no OCR result)
+        input_ids = (
+            [self.cls_token_id]
+            + input_ids[: self.max_seq_length - 2]
+            + [self.sep_token_id]
+        )
+        if len(bboxes) == 0:  # When len(json_obj["words"]) == 0 (no OCR result)
             bboxes = [cls_bbs] + [sep_bbs]
         else:  # len(list_bbs) > 0
             bboxes = [cls_bbs] + bboxes[: self.max_seq_length - 2] + [sep_bbs]
         bboxes = np.array(bboxes)
         labels = [self.pad_token] + labels[: self.max_seq_length - 2] + [self.pad_token]
-        labels = [self.bioes_class_name2idx[l] if l != self.pad_token else self.ignore_label_id for l in labels]
+        labels = [
+            self.bioes_class_name2idx[l]
+            if l != self.pad_token
+            else self.ignore_label_id
+            for l in labels
+        ]
 
         # update ppadded input_ids, labels, bboxes
         len_ori_input_ids = len(input_ids)
@@ -247,7 +269,6 @@ class FUNSDBIOESDataset(Dataset):
         padded_labels[:len_ori_input_ids] = np.array(labels)
         attention_mask[:len_ori_input_ids] = 1
         padded_bboxes[:len_ori_input_ids, :] = bboxes
-
 
         # expand bbox from [x1, y1, x2, y2] (2points) -> [x1, y1, x2, y1, x2, y2, x1, y2] (4points)
         padded_bboxes = padded_bboxes[:, [0, 1, 2, 1, 2, 3, 0, 3]]
@@ -276,6 +297,7 @@ class FUNSDBIOESDataset(Dataset):
         }
 
         return return_dict
+
 
 class BROSDataPLModule(pl.LightningDataModule):
     def __init__(self, cfg):
@@ -382,10 +404,9 @@ class BROSModelPLModule(pl.LightningModule):
         bbox = batch["bbox"]
         attention_mask = batch["attention_mask"]
         are_box_first_tokens = batch["are_box_first_tokens"]
-        are_box_end_tokens  = batch["are_box_end_tokens"]
+        are_box_end_tokens = batch["are_box_end_tokens"]
         gt_labels = batch["labels"]
         labels = batch["labels"]
-
 
         # inference model
         prediction = self.model(
@@ -402,11 +423,14 @@ class BROSModelPLModule(pl.LightningModule):
         n_batch_gt_classes, n_batch_pred_classes, n_batch_correct_classes = 0, 0, 0
         batch_size = prediction.logits.shape[0]
 
-        for example_idx, (pred_label, gt_label, box_first_token_mask, box_end_token_mask) in enumerate(
+        for example_idx, (
+            pred_label,
+            gt_label,
+            box_first_token_mask,
+            box_end_token_mask,
+        ) in enumerate(
             zip(pred_labels, gt_labels, are_box_first_tokens, are_box_end_tokens)
         ):
-
-
             # validation loss : # calculate validation loss of "box_first_tokens" only
             valid_gt_label = gt_label[box_first_token_mask]
             valid_pred_label = pred_label[box_first_token_mask]
@@ -414,21 +438,37 @@ class BROSModelPLModule(pl.LightningModule):
             gt_parse = parse_from_seq(valid_gt_label, self.class_names)
             pred_parse = parse_from_seq(valid_pred_label, self.class_names)
 
-            n_gt_classes = sum([len(gt_parse[class_idx]) for class_idx in range(len(self.class_names))])
-            n_pred_classes = sum([len(pred_parse[class_idx]) for class_idx in range(len(self.class_names))])
+            n_gt_classes = sum(
+                [len(gt_parse[class_idx]) for class_idx in range(len(self.class_names))]
+            )
+            n_pred_classes = sum(
+                [
+                    len(pred_parse[class_idx])
+                    for class_idx in range(len(self.class_names))
+                ]
+            )
             n_correct_classes = sum(
-                [len(gt_parse[class_idx] & pred_parse[class_idx]) for class_idx in range(len(self.class_names))]
+                [
+                    len(gt_parse[class_idx] & pred_parse[class_idx])
+                    for class_idx in range(len(self.class_names))
+                ]
             )
             n_batch_gt_classes += n_gt_classes
             n_batch_pred_classes += n_pred_classes
             n_batch_correct_classes += n_correct_classes
 
             box_first_token_idx2ori_idx = box_first_token_mask.nonzero(as_tuple=True)[0]
-            box2token_span_maps = torch.hstack((
-                (box_first_token_mask == True).nonzero(),
-                (box_end_token_mask == True).nonzero()
-            )).cpu().numpy()
-            start_token_idx2end_token_idx = {e[0]:e[1] for e in box2token_span_maps}
+            box2token_span_maps = (
+                torch.hstack(
+                    (
+                        (box_first_token_mask == True).nonzero(),
+                        (box_end_token_mask == True).nonzero(),
+                    )
+                )
+                .cpu()
+                .numpy()
+            )
+            start_token_idx2end_token_idx = {e[0]: e[1] for e in box2token_span_maps}
 
             pred_cls2text = {name: [] for name in self.class_names}
             gt_cls2text = deepcopy(pred_cls2text)
@@ -437,43 +477,99 @@ class BROSModelPLModule(pl.LightningModule):
             for cls_idx, cls_name in enumerate(self.class_names):
                 # all pred text for cls
                 for box_first_token_indices in pred_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
                     pred_text = self.tokenizer.decode(input_ids[example_idx][text_span])
                     pred_cls2text[cls_name].append(pred_text)
 
                 # all gt text for cls
                 for box_first_token_indices in gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
                     gt_text = self.tokenizer.decode(input_ids[example_idx][text_span])
                     gt_cls2text[cls_name].append(gt_text)
 
                 # all correct text for cls
                 for box_first_token_indices in pred_parse[cls_idx] & gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    correct_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
+                    correct_text = self.tokenizer.decode(
+                        input_ids[example_idx][text_span]
+                    )
                     correct_cls2text[cls_name].append(correct_text)
 
                 # all incorrect text for cls (text in gt but not in pred + text not in gt but in pred)
                 for box_first_token_indices in pred_parse[cls_idx] ^ gt_parse[cls_idx]:
-                    ori_indices = box_first_token_idx2ori_idx[torch.tensor(box_first_token_indices)].cpu().tolist()
-                    text_span = torch.tensor(list(range(ori_indices[0], start_token_idx2end_token_idx[ori_indices[-1]])))
-                    incorrect_text = self.tokenizer.decode(input_ids[example_idx][text_span])
+                    ori_indices = (
+                        box_first_token_idx2ori_idx[
+                            torch.tensor(box_first_token_indices)
+                        ]
+                        .cpu()
+                        .tolist()
+                    )
+                    text_span = torch.tensor(
+                        list(
+                            range(
+                                ori_indices[0],
+                                start_token_idx2end_token_idx[ori_indices[-1]],
+                            )
+                        )
+                    )
+                    incorrect_text = self.tokenizer.decode(
+                        input_ids[example_idx][text_span]
+                    )
                     incorrect_cls2text[cls_name].append(incorrect_text)
 
-        print('prediction: ...')
+        print("prediction: ...")
         for cls, text in pred_cls2text.items():
-            pprint(f'   {cls} : {text}')
+            pprint(f"   {cls} : {text}")
 
-        print('gt: ...')
+        print("gt: ...")
         for cls, text in gt_cls2text.items():
-            pprint(f'   {cls} : {text}')
+            pprint(f"   {cls} : {text}")
 
-        print('correct: ...')
+        print("correct: ...")
         for cls, text in correct_cls2text.items():
-            pprint(f'   {cls} : {text}')
+            pprint(f"   {cls} : {text}")
 
         step_out = {
             "n_batch_gt_classes": n_batch_gt_classes,
@@ -667,11 +763,13 @@ def train(cfg):
         # then checkpoint and huggingface model are not guaranteed to be matching
         # because we are saving with huggingface model with save_pretrained method
         # in "on_save_checkpoint" method in "BROSModelPLModule"
-        mode='min',
+        mode="min",
     )
 
     model_summary_callback = ModelSummary(max_depth=5)
-    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min")
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss", min_delta=0.00, patience=5, verbose=True, mode="min"
+    )
 
     # define Trainer and start training
     trainer = pl.Trainer(
@@ -695,6 +793,7 @@ def train(cfg):
 
     trainer.fit(model_module, data_module, ckpt_path=cfg.train.get("ckpt_path", None))
 
+
 if __name__ == "__main__":
     # load training config
     finetune_funsd_ee_bioes_config = {
@@ -711,7 +810,7 @@ if __name__ == "__main__":
             "max_seq_length": 512,
         },
         "train": {
-            "ckpt_path": None, # or None
+            "ckpt_path": None,  # or None
             "batch_size": 16,
             "num_samples_per_epoch": 150,
             "max_epochs": 30,
