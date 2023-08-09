@@ -37,14 +37,51 @@ from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from bros import BrosConfig, BrosTokenizer
-from bros.modeling_bros import BrosForTokenClassification
+from transformers import BrosForTokenClassification
+from transformers import BrosConfig, BrosTokenizer
 from datasets import load_dataset, load_from_disk
-from lightning_modules.schedulers import (
-    cosine_scheduler,
-    linear_scheduler,
-    multistep_scheduler,
-)
+
+def linear_scheduler(optimizer, warmup_steps, training_steps, last_epoch=-1):
+    """linear_scheduler with warmup from huggingface"""
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return max(
+            0.0,
+            float(training_steps - current_step)
+            / float(max(1, training_steps - warmup_steps)),
+        )
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def cosine_scheduler(
+    optimizer, warmup_steps, training_steps, cycles=0.5, last_epoch=-1
+):
+    """Cosine LR scheduler with warmup from huggingface"""
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        progress = current_step - warmup_steps
+        progress /= max(1, training_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * cycles * 2 * progress)))
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def multistep_scheduler(optimizer, warmup_steps, milestones, gamma=0.1, last_epoch=-1):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # calculate a warmup ratio
+            return current_step / max(1, warmup_steps)
+        else:
+            # calculate a multistep lr scaling ratio
+            idx = np.searchsorted(milestones, current_step)
+            return gamma ** idx
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 class FUNSDBIOESDataset(Dataset):
@@ -639,7 +676,7 @@ def train(cfg):
     # define Trainer and start training
     trainer = pl.Trainer(
         accelerator=cfg.train.accelerator,
-        strategy="ddp_find_unused_parameters_true",
+        strategy=cfg.train.get("strategy", None),
         num_nodes=cfg.get("num_nodes", 1),
         precision=16 if cfg.train.use_fp16 else 32,
         logger=loggers,
@@ -680,7 +717,7 @@ if __name__ == "__main__":
             "max_epochs": 30,
             "use_fp16": True,
             "accelerator": "gpu",
-            "strategy": {"type": "ddp"},
+            "strategy": "ddp_find_unused_parameters_true",
             "clip_gradient_algorithm": "norm",
             "clip_gradient_value": 1.0,
             "num_workers": 8,
