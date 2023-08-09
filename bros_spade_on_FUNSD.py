@@ -34,19 +34,58 @@ from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
+from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from bros import BrosConfig, BrosTokenizer
-from bros.modeling_bros import BrosForTokenClassificationWithSpade
+from transformers import BrosForTokenClassificationWithSpade
+from transformers import BrosConfig, BrosTokenizer
+
 from datasets import load_dataset, load_from_disk
-from lightning_modules.schedulers import (
-    cosine_scheduler,
-    linear_scheduler,
-    multistep_scheduler,
-)
 
 torch.set_printoptions(threshold=2000000)
+
+def linear_scheduler(optimizer, warmup_steps, training_steps, last_epoch=-1):
+    """linear_scheduler with warmup from huggingface"""
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return max(
+            0.0,
+            float(training_steps - current_step)
+            / float(max(1, training_steps - warmup_steps)),
+        )
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def cosine_scheduler(
+    optimizer, warmup_steps, training_steps, cycles=0.5, last_epoch=-1
+):
+    """Cosine LR scheduler with warmup from huggingface"""
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return current_step / max(1, warmup_steps)
+        progress = current_step - warmup_steps
+        progress /= max(1, training_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * cycles * 2 * progress)))
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+def multistep_scheduler(optimizer, warmup_steps, milestones, gamma=0.1, last_epoch=-1):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # calculate a warmup ratio
+            return current_step / max(1, warmup_steps)
+        else:
+            # calculate a multistep lr scaling ratio
+            idx = np.searchsorted(milestones, current_step)
+            return gamma ** idx
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 class FUNSDSpadeDataset(Dataset):
     """ FUNSD BIOES tagging Dataset
@@ -284,6 +323,192 @@ class BROSDataPLModule(pl.LightningDataModule):
                 batch[k] = batch[k].to(device)
         return batch
 
+def do_eval_step(batch, head_outputs, loss, eval_kwargs):
+    class_names = eval_kwargs["class_names"]
+    dummy_idx = eval_kwargs["dummy_idx"]
+
+    itc_outputs = head_outputs["itc_outputs"]
+    stc_outputs = head_outputs["stc_outputs"]
+
+    pr_itc_labels = torch.argmax(itc_outputs, -1)
+    pr_stc_labels = torch.argmax(stc_outputs, -1)
+
+    (
+        n_batch_gt_classes,
+        n_batch_pr_classes,
+        n_batch_correct_classes,
+    ) = eval_ee_spade_batch(
+        pr_itc_labels,
+        batch["itc_labels"],
+        batch["are_box_first_tokens"],
+        pr_stc_labels,
+        batch["stc_labels"],
+        batch["attention_mask"],
+        class_names,
+        dummy_idx,
+    )
+
+    step_out = {
+        "loss": loss,
+        "n_batch_gt_classes": n_batch_gt_classes,
+        "n_batch_pr_classes": n_batch_pr_classes,
+        "n_batch_correct_classes": n_batch_correct_classes,
+    }
+
+    return step_out
+
+
+def eval_ee_spade_batch(
+    pr_itc_labels,
+    gt_itc_labels,
+    are_box_first_tokens,
+    pr_stc_labels,
+    gt_stc_labels,
+    attention_mask,
+    class_names,
+    dummy_idx,
+):
+    n_batch_gt_classes, n_batch_pr_classes, n_batch_correct_classes = 0, 0, 0
+
+    bsz = pr_itc_labels.shape[0]
+    for example_idx in range(bsz):
+        n_gt_classes, n_pr_classes, n_correct_classes = eval_ee_spade_example(
+            pr_itc_labels[example_idx],
+            gt_itc_labels[example_idx],
+            are_box_first_tokens[example_idx],
+            pr_stc_labels[example_idx],
+            gt_stc_labels[example_idx],
+            attention_mask[example_idx],
+            class_names,
+            dummy_idx,
+        )
+
+        n_batch_gt_classes += n_gt_classes
+        n_batch_pr_classes += n_pr_classes
+        n_batch_correct_classes += n_correct_classes
+
+    return (
+        n_batch_gt_classes,
+        n_batch_pr_classes,
+        n_batch_correct_classes,
+    )
+
+
+def eval_ee_spade_example(
+    pr_itc_label,
+    gt_itc_label,
+    box_first_token_mask,
+    pr_stc_label,
+    gt_stc_label,
+    attention_mask,
+    class_names,
+    dummy_idx,
+):
+    gt_first_words = parse_initial_words(
+        gt_itc_label, box_first_token_mask, class_names
+    )
+    gt_class_words = parse_subsequent_words(
+        gt_stc_label, attention_mask, gt_first_words, dummy_idx
+    )
+
+    pr_init_words = parse_initial_words(pr_itc_label, box_first_token_mask, class_names)
+    pr_class_words = parse_subsequent_words(
+        pr_stc_label, attention_mask, pr_init_words, dummy_idx
+    )
+
+    n_gt_classes, n_pr_classes, n_correct_classes = 0, 0, 0
+    for class_idx in range(len(class_names)):
+        # Evaluate by ID
+        gt_parse = set(gt_class_words[class_idx])
+        pr_parse = set(pr_class_words[class_idx])
+
+        n_gt_classes += len(gt_parse)
+        n_pr_classes += len(pr_parse)
+        n_correct_classes += len(gt_parse & pr_parse)
+
+    return n_gt_classes, n_pr_classes, n_correct_classes
+
+
+def parse_initial_words(itc_label, box_first_token_mask, class_names):
+    itc_label_np = itc_label.cpu().numpy()
+    box_first_token_mask_np = box_first_token_mask.cpu().numpy()
+
+    outputs = [[] for _ in range(len(class_names))]
+    for token_idx, label in enumerate(itc_label_np):
+        if box_first_token_mask_np[token_idx] and label != 0:
+            outputs[label].append(token_idx)
+
+    return outputs
+
+
+def parse_subsequent_words(stc_label, attention_mask, init_words, dummy_idx):
+    max_connections = 50
+
+    valid_stc_label = stc_label * attention_mask.bool()
+    valid_stc_label = valid_stc_label.cpu().numpy()
+    stc_label_np = stc_label.cpu().numpy()
+
+    valid_token_indices = np.where(
+        (valid_stc_label != dummy_idx) * (valid_stc_label != 0)
+    )
+
+    next_token_idx_dict = {}
+    for token_idx in valid_token_indices[0]:
+        next_token_idx_dict[stc_label_np[token_idx]] = token_idx
+
+    outputs = []
+    for init_token_indices in init_words:
+        sub_outputs = []
+        for init_token_idx in init_token_indices:
+            cur_token_indices = [init_token_idx]
+            for _ in range(max_connections):
+                if cur_token_indices[-1] in next_token_idx_dict:
+                    if (
+                        next_token_idx_dict[cur_token_indices[-1]]
+                        not in init_token_indices
+                    ):
+                        cur_token_indices.append(
+                            next_token_idx_dict[cur_token_indices[-1]]
+                        )
+                    else:
+                        break
+                else:
+                    break
+            sub_outputs.append(tuple(cur_token_indices))
+
+        outputs.append(sub_outputs)
+
+    return outputs
+
+
+def do_eval_epoch_end(step_outputs):
+    n_total_gt_classes, n_total_pr_classes, n_total_correct_classes = 0, 0, 0
+
+    for step_out in step_outputs:
+        n_total_gt_classes += step_out["n_batch_gt_classes"]
+        n_total_pr_classes += step_out["n_batch_pr_classes"]
+        n_total_correct_classes += step_out["n_batch_correct_classes"]
+
+    precision = (
+        0.0 if n_total_pr_classes == 0 else n_total_correct_classes / n_total_pr_classes
+    )
+    recall = (
+        0.0 if n_total_gt_classes == 0 else n_total_correct_classes / n_total_gt_classes
+    )
+    f1 = (
+        0.0
+        if recall * precision == 0
+        else 2.0 * recall * precision / (recall + precision)
+    )
+
+    scores = {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+    return scores
+
 
 class BROSModelPLModule(pl.LightningModule):
     def __init__(self, cfg, tokenizer):
@@ -344,6 +569,8 @@ class BROSModelPLModule(pl.LightningModule):
             itc_labels=itc_labels,
             stc_labels=stc_labels,
         )
+
+        # do_eval_step()
 
         val_loss = prediction.loss
         # pred_labels = torch.argmax(prediction.logits, -1)
@@ -578,8 +805,7 @@ if __name__ == "__main__":
         },
         "train": {
             "ckpt_path": None, # or None
-            # "batch_size": 16,
-            "batch_size": 4,
+            "batch_size": 1,
             "num_samples_per_epoch": 149,
             "max_epochs": 30,
             "use_fp16": True,
@@ -588,17 +814,14 @@ if __name__ == "__main__":
             "clip_gradient_algorithm": "norm",
             "clip_gradient_value": 1.0,
             "num_workers": 8,
-            # "num_workers": 0,
             "optimizer": {
                 "method": "adamw",
                 "params": {"lr": 5e-05},
-                # "lr_schedule": {"method": "linear", "params": {"warmup_steps": 0}},
                 "lr_schedule": {"method": "linear", "params": {"warmup_steps": 0}},
             },
             "val_interval": 1,
         },
-        # "val": {"batch_size": 16, "num_workers": 0, "limit_val_batches": 1.0},
-        "val": {"batch_size": 4, "num_workers": 0, "limit_val_batches": 1.0},
+        "val": {"batch_size": 1, "num_workers": 8, "limit_val_batches": 1.0},
     }
 
     # convert dictionary to omegaconf and update config
